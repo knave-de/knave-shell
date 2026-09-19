@@ -1,6 +1,6 @@
-# KnaveShell
+# Knave Shell
 
-KnaveShell is the home of Villain, a Wayland compositor under active
+Knave Shell is the home of Villain, a Wayland compositor under active
 development.
 
 ## Status
@@ -30,4 +30,4 @@ repository workflow rules.
 
 ## License
 
-KnaveShell is available under the [MIT License](LICENSE).
+Knave Shell is available under the [MIT License](LICENSE).

@@ -1,6 +1,6 @@
-# KnaveShell
+# Knave Shell
 
-KnaveShell is the repository for Villain, a Wayland compositor. Keep repository
+Knave Shell is the repository for Villain, a Wayland compositor. Keep repository
 guidance and project documentation accurate as the implementation grows.
 
 ## Repository expectations
