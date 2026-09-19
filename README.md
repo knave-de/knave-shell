@@ -1,13 +1,12 @@
 # Knave Shell
 
-Knave Shell is the home of Villain, a Wayland compositor under active
-development.
+Knave Shell is the shell for the Knave desktop environment, working on top of
+the Villain window manager.
 
 ## Status
 
-The repository is currently an early project skeleton. The compositor
-implementation and its build instructions will be documented here as they are
-introduced.
+The repository is currently an early project skeleton. The shell implementation
+and its build instructions will be documented here as they are introduced.
 
 ## Repository layout
 
@@ -20,7 +19,7 @@ introduced.
 
 There is no build or test command configured yet. Once the implementation and
 toolchain are added, this section should include the required dependencies and
-the commands for building, testing, and running Villain.
+the commands for building, testing, and running Knave Shell.
 
 ## Contributing
 

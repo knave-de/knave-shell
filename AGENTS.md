@@ -1,7 +1,8 @@
 # Knave Shell
 
-Knave Shell is the repository for Villain, a Wayland compositor. Keep repository
-guidance and project documentation accurate as the implementation grows.
+Knave Shell is the shell for the Knave desktop environment, working on top of
+the Villain window manager. Keep repository guidance and project documentation
+accurate as the implementation grows.
 
 ## Repository expectations
 
