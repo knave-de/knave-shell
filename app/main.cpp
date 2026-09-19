@@ -33,7 +33,12 @@ bool toggleExistingOverview(const QString &name)
 
 void configurePluginPath(const char *argv0)
 {
-    const QDir binDirectory(QFileInfo(QString::fromLocal8Bit(argv0)).absolutePath());
+    QFileInfo executable(QStringLiteral("/proc/self/exe"));
+    QString executablePath = executable.canonicalFilePath();
+    if (executablePath.isEmpty())
+        executablePath = QFileInfo(QString::fromLocal8Bit(argv0)).absoluteFilePath();
+
+    const QDir binDirectory(QFileInfo(executablePath).absolutePath());
     QStringList paths{
         binDirectory.absoluteFilePath(QStringLiteral("../plugins")),
         binDirectory.absoluteFilePath(QStringLiteral("../lib/knave-shell/plugins")),
