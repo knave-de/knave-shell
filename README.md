@@ -1,141 +1,127 @@
 # Knave Shell
 
-Knave Shell is the Qt Quick desktop shell for the Knave desktop environment.
-It presents desktop UI while Villain remains responsible for composition,
-workspaces, windows, input, and focus.
+Knave Shell is the desktop-facing shell for the Knave Desktop Environment. The
+current implementation is a Qt Quick application with C++ adapters, a Rust
+core, and a private Qt Wayland layer-shell plugin. The Rust/wgpu shell is a
+future replacement, not the current build.
 
-The first implemented slice is a persistent top bar and a workspace overview.
-The bar's menu button opens the overview. Pressing and releasing Villain's
-`MOD` key on its own opens the same view; a modifier combination such as
-`MOD+1` cancels that standalone action.
+## Responsibilities
 
-## Architecture
+Knave Shell owns presentation and interaction:
 
-```text
-Qt Quick / QML UI
-        │
-        │ typed C ABI
-        ▼
-knave-shell-core (Rust)
-        │
-        │ Villain JSON IPC v2
-        ▼
-Villain compositor
-```
+- the top bar;
+- the workspace and window overview;
+- shell-side search and focus actions;
+- the Rust IPC client and decoded state model; and
+- layer-shell integration for shell surfaces.
 
-The QML layer renders the bar, search, workspace carousel, and interactions.
-The C++ adapter exposes shell state to QML. `knave-shell-core` owns the typed
-IPC client, reconnect behavior, workspace/window models, and decoded preview
-cache. Villain generates the real workspace snapshots and handles focus
-actions.
+Villain remains the source of truth for windows, workspaces, focus, layout,
+input, and composition. The shell does not own compositor policy or a
+user-facing configuration file.
 
-The bar and overview are native `wlr-layer-shell` surfaces:
+    Qt Quick / QML
+          |
+          v
+    C++ ShellService
+          | typed C ABI
+          v
+    knave-shell-core (Rust)
+          | Villain IPC
+          v
+    Villain compositor
 
-- `bar` is anchored to the top edge and reserves 36 logical pixels.
-- `overview` covers the output on the overlay layer and requests exclusive
-  keyboard focus while it is open.
-
-The overview searches open windows and workspace actions. Choosing a workspace
-or window asks Villain to focus it and then closes the overview. `Escape` closes
-the overview without changing focus.
+The current shell uses Villain IPC protocol v2. The Rust core rejects an older
+protocol during connection setup.
 
 ## Repository layout
 
-| Path | Description |
+| Path | Purpose |
 | --- | --- |
-| `app/` | C++ application entry point and QML service adapter |
-| `core/` | Rust shell core and stable C header |
-| `layer-shell/` | Qt Wayland shell-integration plugin |
-| `protocols/` | Layer-shell protocol definition used for code generation |
-| `qml/` | Bar and workspace overview views |
+| app/ | Application entry point and QML service adapter |
+| core/ | Rust state, IPC client, previews, and stable C header |
+| layer-shell/ | Qt Wayland shell-integration plugin |
+| protocols/ | Wayland XML used for generated client code |
+| qml/ | Bar and overview views |
 
 ## Requirements
 
-- Rust and Cargo
-- CMake 3.24 or newer
-- a C++20 compiler
-- Qt 6.6 or newer with Core, Gui, QML, Quick, Quick Controls 2, Wayland Client,
-  and the Qt Wayland private development headers
-- Wayland client development files, `wayland-protocols`, `wayland-scanner`, and
-  `pkg-config`
-- Villain with IPC protocol v2 workspace-preview support
+- Rust and Cargo;
+- CMake 3.24 or newer, Ninja, and a C++20 compiler;
+- Qt 6.6 or newer with Core, Gui, QML, Quick, Quick Controls 2,
+  Wayland Client, and Qt Wayland private development headers;
+- Wayland client development files, wayland-protocols, wayland-scanner, and
+  pkg-config; and
+- a running Villain compositor exposing IPC protocol v2.
 
-The layer-shell integration uses Qt Wayland private API because Qt does not
-provide a public API for custom shell roles. Rebuild Knave Shell after a Qt
-Wayland update; the plugin is tied to the exact Qt build it was compiled
-against.
+The layer-shell plugin uses Qt Wayland private API. Rebuild it after a Qt
+Wayland update; it is tied to the Qt build it was compiled against.
 
 ## Build
 
-```console
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-```
+Use an isolated Ninja build directory and an explicit staging prefix:
 
-CMake builds the Rust core through Cargo and links its static library into the
-shell executable. To install under a chosen prefix:
+    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+    cmake --build build
+    cmake --install build --prefix "$PWD/stage"
 
-```console
-cmake --install build --prefix /usr/local
-```
+CMake invokes Cargo with the locked workspace dependency set and links the
+debug Rust static library into the shell executable. The current CMake
+integration is transitional; it is not a Cargo-only shell build.
+
+Run the Rust checks separately:
+
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
 
 ## Run
 
-Start the persistent bar inside a Wayland session running Villain:
+Start Villain first, then run the shell inside the same Wayland session:
 
-```console
-build/bin/knave-shell bar
-```
+    build/bin/knave-shell bar
+    build/bin/knave-shell overview
 
-Open or toggle the overview directly:
+The role defaults to bar. The overview uses a per-display local control socket
+so a second overview invocation toggles the existing instance. Set
+KNAVE_SHELL_DISABLE_SINGLE_INSTANCE=1 to disable that behavior during testing.
 
-```console
-build/bin/knave-shell overview
-```
+The Rust core discovers Villain at:
 
-The shell discovers Villain at
-`$XDG_RUNTIME_DIR/villain-$WAYLAND_DISPLAY.sock`. Set `VILLAIN_SOCKET` to use
-an explicit socket during development.
+    $XDG_RUNTIME_DIR/villain-$WAYLAND_DISPLAY.sock
 
-Villain's built-in bindings launch `knave-shell overview` when `MOD` is pressed
-and released alone. If a Villain configuration contains any custom `[[bind]]`
-entries, it replaces the complete default set, so include this binding:
+Set VILLAIN_SOCKET to override the socket path. The shell configures its
+Wayland platform and layer-shell plugin path from the executable location;
+QT_PLUGIN_PATH may be supplied for an additional development path.
 
-```toml
-[[bind]]
-keys = "MOD"
-dispatch = "exec"
-args = ["knave-shell", "overview"]
-```
+## Interaction
 
-## Verify
+The bar's menu action starts the overview. Villain can also bind a standalone
+modifier release to:
 
-Run the Rust checks:
+    [[bind]]
+    keys = "MOD"
+    dispatch = "exec"
+    args = ["knave-shell", "overview"]
 
-```console
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
+The overview can focus a workspace or window through Villain. Escape closes
+the overview without changing focus. Behavior that depends on focus, input,
+layer-shell, GPU presentation, or an installed prefix requires a live test;
+unit tests and compilation are not sufficient.
 
-Then configure and compile the complete application:
+## Configuration and migration
 
-```console
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-```
+Knave owns the target configuration at ~/.config/knave/config.toml. This
+repository must not introduce a competing shell configuration file. Current
+shell settings are supplied by runtime contracts and environment variables
+while the Knave settings API is being implemented.
 
-The final interaction check must run in a real Wayland session: open the bar,
-open the overview from both the menu button and `MOD`, switch a workspace,
-focus a searched window, and confirm `Escape` returns keyboard focus to the
-desktop.
+## Documentation
 
-## Contributing
+- [Architecture index](docs/architecture/README.md)
+- [Component boundaries](docs/architecture/component-boundaries.md)
+- [Performance policy](docs/architecture/performance.md)
+- [Change-impact checklist](docs/architecture/change-impact.md)
+- [Agent instructions](AGENTS.md)
 
-Create a branch for each task, use [Conventional Commits](https://www.conventionalcommits.org/),
-and squash changes before merging. See [`AGENTS.md`](AGENTS.md) for the
-repository workflow rules.
-
-## License
-
-Knave Shell is available under the [MIT License](LICENSE).
+Use Conventional Commits and describe cross-repository contract, compatibility,
+verification, rollout, and rollback impact in pull requests.
