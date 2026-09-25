@@ -9,7 +9,8 @@ use std::{
 };
 
 use knave_desktop_api::{
-    DesktopClient, DesktopQuery, DesktopRequest, DesktopResponse, DesktopSnapshot,
+    DesktopClient, DesktopCommand, DesktopQuery, DesktopRequest, DesktopResponse, DesktopSnapshot,
+    WorkspaceId,
 };
 use knave_renderer::{RenderCommand, WgpuPainter, WgpuRenderer};
 use knave_ui::{Color, UiScene};
@@ -19,6 +20,10 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::{
+        Capability, SeatHandler, SeatState,
+        keyboard::{KeyEvent, KeyboardHandler, Modifiers, RawModifiers},
+    },
     shell::{
         WaylandSurface,
         wlr_layer::{
@@ -30,7 +35,7 @@ use smithay_client_toolkit::{
 use wayland_client::{
     Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_output, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_seat, wl_surface},
 };
 use wgpu::rwh::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
 
@@ -201,6 +206,71 @@ impl Drop for SnapshotWorker {
     }
 }
 
+enum ActionCommand {
+    Dispatch(DesktopCommand),
+    Stop,
+}
+
+struct ActionWorker {
+    commands: SyncSender<ActionCommand>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ActionWorker {
+    fn start() -> Self {
+        let (commands, command_rx) = mpsc::sync_channel(1);
+        let thread = thread::spawn(move || {
+            let mut client = None;
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    ActionCommand::Stop => break,
+                    ActionCommand::Dispatch(command) => {
+                        if let Err(error) = dispatch_action(&mut client, command) {
+                            eprintln!("knave-shell: shell action failed: {error}");
+                            client = None;
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            commands,
+            thread: Some(thread),
+        }
+    }
+
+    fn dispatch(&self, command: DesktopCommand) {
+        if self
+            .commands
+            .try_send(ActionCommand::Dispatch(command))
+            .is_err()
+        {
+            eprintln!("knave-shell: shell action queue is full; dropping action");
+        }
+    }
+}
+
+impl Drop for ActionWorker {
+    fn drop(&mut self) {
+        let _ = self.commands.try_send(ActionCommand::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn dispatch_action(
+    client: &mut Option<DesktopClient>,
+    command: DesktopCommand,
+) -> Result<(), knave_desktop_api::ClientError> {
+    if client.is_none() {
+        *client = Some(DesktopClient::connect()?);
+    }
+    let client = client.as_mut().expect("desktop client was initialized");
+    client.request(&DesktopRequest::Dispatch(command))?;
+    Ok(())
+}
+
 fn query_snapshot(client: &mut Option<DesktopClient>) -> Result<DesktopSnapshot, ()> {
     if client.is_none() {
         *client = Some(DesktopClient::connect().map_err(|_| ())?);
@@ -285,6 +355,8 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
     let mut state = Runtime {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &queue_handle),
+        seat_state: SeatState::new(&globals, &queue_handle),
+        keyboard: None,
         role,
         layer,
         renderer,
@@ -296,6 +368,7 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
         height: 1,
         revision: 0,
         snapshot_worker: SnapshotWorker::start(),
+        action_worker: ActionWorker::start(),
         snapshot: None,
         painter: None,
         configured: false,
@@ -314,6 +387,8 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
 struct Runtime {
     registry_state: RegistryState,
     output_state: OutputState,
+    seat_state: SeatState,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
     role: ShellRole,
     layer: LayerSurface,
     renderer: WgpuRenderer,
@@ -323,6 +398,7 @@ struct Runtime {
     queue: wgpu::Queue,
     painter: Option<WgpuPainter>,
     snapshot_worker: SnapshotWorker,
+    action_worker: ActionWorker,
     snapshot: Option<DesktopSnapshot>,
     width: u32,
     height: u32,
@@ -422,6 +498,147 @@ impl Runtime {
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
         self.revision = self.revision.wrapping_add(1);
+    }
+}
+
+impl Runtime {
+    fn handle_key(&mut self, event: KeyEvent) {
+        match overview_action(self.role, event.keysym.raw()) {
+            Some(OverviewAction::Close) => self.exit = true,
+            Some(OverviewAction::FocusWorkspace(workspace)) => {
+                self.action_worker
+                    .dispatch(DesktopCommand::FocusWorkspace { workspace });
+                self.exit = true;
+            }
+            None => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverviewAction {
+    Close,
+    FocusWorkspace(WorkspaceId),
+}
+
+fn overview_action(role: ShellRole, raw_keysym: u32) -> Option<OverviewAction> {
+    if role != ShellRole::Overview {
+        return None;
+    }
+    match raw_keysym {
+        0xff1b => Some(OverviewAction::Close),
+        0x31..=0x39 => Some(OverviewAction::FocusWorkspace(WorkspaceId(
+            raw_keysym - 0x30,
+        ))),
+        0x30 => Some(OverviewAction::FocusWorkspace(WorkspaceId(10))),
+        _ => None,
+    }
+}
+
+impl SeatHandler for Runtime {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Keyboard && self.keyboard.is_none() {
+            match self.seat_state.get_keyboard(qh, &seat, None) {
+                Ok(keyboard) => self.keyboard = Some(keyboard),
+                Err(error) => eprintln!("knave-shell: could not acquire shell keyboard: {error}"),
+            }
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Keyboard
+            && let Some(keyboard) = self.keyboard.take()
+        {
+            keyboard.release();
+        }
+    }
+
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {
+    }
+}
+
+impl KeyboardHandler for Runtime {
+    fn enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+        _raw: &[u32],
+        _keysyms: &[smithay_client_toolkit::seat::keyboard::Keysym],
+    ) {
+    }
+
+    fn leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+    ) {
+    }
+
+    fn press_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        self.handle_key(event);
+    }
+
+    fn repeat_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _event: KeyEvent,
+    ) {
+    }
+
+    fn release_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _event: KeyEvent,
+    ) {
+    }
+
+    fn update_modifiers(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _modifiers: Modifiers,
+        _raw_modifiers: RawModifiers,
+        _layout: u32,
+    ) {
     }
 }
 
@@ -541,7 +758,7 @@ impl ProvidesRegistryState for Runtime {
         &mut self.registry_state
     }
 
-    registry_handlers![OutputState];
+    registry_handlers![OutputState, SeatState];
 }
 
 smithay_client_toolkit::delegate_dispatch2!(Runtime);
@@ -557,5 +774,19 @@ mod tests {
         assert_eq!(ShellRole::Overview.exclusive_zone(), -1);
         assert_eq!(ShellRole::parse("bar"), Some(ShellRole::Bar));
         assert_eq!(ShellRole::parse("unknown"), None);
+    }
+
+    #[test]
+    fn overview_keyboard_actions_are_role_scoped_and_bounded() {
+        assert_eq!(
+            overview_action(ShellRole::Overview, 0x31),
+            Some(OverviewAction::FocusWorkspace(WorkspaceId(1)))
+        );
+        assert_eq!(
+            overview_action(ShellRole::Overview, 0xff1b),
+            Some(OverviewAction::Close)
+        );
+        assert_eq!(overview_action(ShellRole::Bar, 0x31), None);
+        assert_eq!(overview_action(ShellRole::Overview, 0x61), None);
     }
 }

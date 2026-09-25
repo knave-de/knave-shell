@@ -1,8 +1,8 @@
 # Shell performance and resource usage
 
 Shell performance includes UI responsiveness, event-loop wakeups, IPC traffic,
-Wayland subscriptions, QML model updates, rendering work, and background
-lifecycle tasks.
+Wayland subscriptions, scene updates, rendering work, and background lifecycle
+tasks.
 
 Before adding a timer, watcher, subscription, cache, buffer, task, or thread:
 
@@ -14,7 +14,7 @@ Before adding a timer, watcher, subscription, cache, buffer, task, or thread:
 
 Measure CPU, resident memory, threads, file descriptors, wakeups, and relevant
 latency under idle, normal, and stress workloads. A shell that renders correctly
-or passes unit tests can still wake continuously or retain QML/FFI resources.
+or passes unit tests can still wake continuously or retain GPU/IPC resources.
 
 Record a baseline and expected delta for performance-sensitive changes. If no
 baseline exists, establish one before declaring the change complete. Report live

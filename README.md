@@ -11,9 +11,10 @@ backend. The direct Wayland layer-shell path is the runtime target.
     knave-shell bar
     knave-shell overview
 
-The bar is a non-interactive top layer with a 36-pixel exclusive zone. The
-overview is an exclusive overlay. Both consume Knave's versioned desktop
-snapshot contract and keep IPC off the Wayland frame thread.
+The bar is a top layer with a 36-pixel exclusive zone. The overview is an
+on-demand exclusive overlay; Escape closes it and number keys 1-9/0 focus the
+corresponding workspace before closing it. Both consume Knave's versioned
+desktop snapshot contract and keep IPC off the Wayland frame thread.
 
 ## Build
 
@@ -33,6 +34,9 @@ KNAVE_SOCKET overrides the derived path for isolated tests. The client uses one
 bounded worker, a one-entry snapshot channel, a 500ms successful refresh
 interval, and exponential reconnect backoff capped at five seconds. It never
 blocks the Wayland frame callback on desktop IPC.
+
+Input actions use a separate one-entry bounded queue and one worker. A full
+queue drops an action with an explicit diagnostic instead of creating threads.
 
 The shell does not own persistent settings. It receives the compositor's
 workspace/window state from Villain through Knave's public contract and sends
