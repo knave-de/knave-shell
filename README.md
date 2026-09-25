@@ -50,10 +50,11 @@ packaging. The installer also writes the README below the selected prefix.
 
 ## Migration status
 
-The Rust/wgpu workspace is the target shell implementation. The renderer now
-draws bounded rectangle and bitmap-text commands; the remaining migration work
-is interaction breadth, packaging, and live Wayland/GPU coverage. The old
-Qt/QML, C++ adapter, and CMake tree is not loaded by the Rust binaries.
+The Rust/wgpu workspace is the sole shell implementation. It draws bounded
+rectangle and bitmap-text commands through the direct Wayland layer-shell
+runtime. Remaining product work is interaction breadth, richer text and image
+primitives, packaging integration, and live direct-TTY/GPU coverage; none of
+these depend on restoring the removed Qt/CMake path.
 
 ## Workspace
 

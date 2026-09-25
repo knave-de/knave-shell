@@ -1,8 +1,8 @@
 # Shell component boundaries
 
 This repository owns the desktop-facing shell implementation and its UI
-composition. It may contain transitional Qt/QML/C++ code and the Rust shell,
-renderer, UI, and Wayland work needed to replace it.
+composition. The implementation is split into Rust crates for UI, rendering,
+Wayland, and the shell binary.
 
 The shell:
 

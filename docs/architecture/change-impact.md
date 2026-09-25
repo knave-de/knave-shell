@@ -15,5 +15,5 @@ buffers, or parallel work, also record idle behavior, resource bounds,
 cancellation and cleanup, and measured CPU, memory, thread, descriptor, and
 wakeup impact under representative workloads.
 
-Keep Qt-to-Rust replacement, settings migration, session supervision, protocol
-changes, and legacy-tool removal in separate reviewable slices.
+Keep settings migration, session supervision, protocol changes, and
+legacy-tool removal in separate reviewable slices.
