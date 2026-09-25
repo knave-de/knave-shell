@@ -8,6 +8,7 @@ configuration, versioning, build, and compatibility policy.
 - [Configuration](configuration.md)
 - [Versioning and compatibility](versioning.md)
 - [Build and packaging](build-and-packaging.md)
+- [Performance and resource usage](performance.md)
 - [Change impact](change-impact.md)
 
 Local documents describe this repository's responsibilities; they do not create

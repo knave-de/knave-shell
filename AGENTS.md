@@ -73,6 +73,24 @@ and spawned processes.
 Comments should explain invariants or non-obvious reasons. Do not narrate
 obvious C++, Rust, or QML code. Keep comments short.
 
+## Performance and resource usage
+
+Review resource behavior before adding QML timers, file or socket watchers,
+IPC subscriptions, image providers, background tasks, threads, caches, or
+parallel work.
+
+- Give each activity an explicit owner, lifetime, cancellation path, and
+  cleanup path for reload, disconnect, and shutdown.
+- Bound subscriptions, model updates, preview/image caches, queues, retries,
+  and concurrency. Do not create one worker or watcher per event without a
+  measured bound.
+- Prefer event-driven notifications, debouncing, batching, and backoff over
+  polling or continuously waking event handlers.
+- Measure CPU, resident memory, threads, file descriptors, and wakeups under
+  idle, normal, and stress workloads when a change can affect them.
+
+Compilation and functional tests do not establish acceptable shell performance.
+
 ## Documentation
 
 Keep README instructions short and executable. Add architecture or migration
