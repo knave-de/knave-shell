@@ -13,7 +13,7 @@ use knave_desktop_api::{
     WorkspaceId,
 };
 use knave_renderer::{RenderCommand, RenderList, WgpuPainter, WgpuRenderer};
-use knave_ui::{Color, UiAction, UiScene};
+use knave_ui::{Color, MAX_SEARCH_QUERY, UiAction, UiScene};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
@@ -103,10 +103,14 @@ impl ShellRole {
         width: f32,
         height: f32,
         snapshot: Option<&DesktopSnapshot>,
+        query: &str,
+        selected: usize,
     ) -> UiScene {
         match self {
             Self::Bar => UiScene::bar_with_snapshot(revision, width, height, snapshot),
-            Self::Overview => UiScene::overview_with_snapshot(revision, width, height, snapshot),
+            Self::Overview => UiScene::overview_with_snapshot_and_search(
+                revision, width, height, snapshot, query, selected,
+            ),
         }
     }
 
@@ -372,6 +376,8 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
         snapshot_worker: SnapshotWorker::start(),
         action_worker: ActionWorker::start(),
         snapshot: None,
+        search_query: String::new(),
+        search_index: 0,
         scene: UiScene::new(0),
         render_list: RenderList::default(),
         scene_dirty: true,
@@ -406,6 +412,8 @@ struct Runtime {
     snapshot_worker: SnapshotWorker,
     action_worker: ActionWorker,
     snapshot: Option<DesktopSnapshot>,
+    search_query: String,
+    search_index: usize,
     scene: UiScene,
     render_list: RenderList,
     scene_dirty: bool,
@@ -436,6 +444,8 @@ impl Runtime {
                 self.width as f32,
                 self.height as f32,
                 self.snapshot.as_ref(),
+                &self.search_query,
+                self.search_index,
             );
             self.render_list = self.renderer.prepare(&self.scene);
             self.scene_dirty = false;
@@ -516,67 +526,102 @@ impl Runtime {
 
 impl Runtime {
     fn handle_key(&mut self, event: KeyEvent) {
-        match overview_action(self.role, event.keysym.raw()) {
-            Some(OverviewAction::Close) => self.exit = true,
-            Some(OverviewAction::FocusWorkspace(workspace)) => {
-                self.action_worker
-                    .dispatch(DesktopCommand::FocusWorkspace { workspace });
+        if self.role != ShellRole::Overview {
+            return;
+        }
+
+        let raw_keysym = event.keysym.raw();
+        match raw_keysym {
+            0xff1b => {
                 self.exit = true;
+                return;
             }
-            None => {}
+            0xff0d => {
+                if let Some(action) = self.scene.search_action(self.search_index) {
+                    self.dispatch_ui_action(action);
+                }
+                return;
+            }
+            0xff51 | 0xff52 => {
+                self.search_index = self.search_index.saturating_sub(1);
+                self.scene_dirty = true;
+                return;
+            }
+            0xff53 | 0xff54 => {
+                let result_count = self.scene.search_result_count();
+                if result_count > 0 {
+                    self.search_index = (self.search_index + 1).min(result_count - 1);
+                }
+                self.scene_dirty = true;
+                return;
+            }
+            0xff08 => {
+                if self.search_query.pop().is_some() {
+                    self.search_index = 0;
+                    self.scene_dirty = true;
+                }
+                return;
+            }
+            0x31..=0x39 if self.search_query.is_empty() => {
+                self.dispatch_ui_action(UiAction::FocusWorkspace(WorkspaceId(raw_keysym - 0x30)));
+                return;
+            }
+            0x30 if self.search_query.is_empty() => {
+                self.dispatch_ui_action(UiAction::FocusWorkspace(WorkspaceId(10)));
+                return;
+            }
+            _ => {}
+        }
+
+        if let Some(text) = event.utf8 {
+            let mut changed = false;
+            for character in text.chars().filter(|character| !character.is_control()) {
+                if self.search_query.chars().count() >= MAX_SEARCH_QUERY {
+                    break;
+                }
+                self.search_query.push(character);
+                changed = true;
+            }
+            if changed {
+                self.search_index = 0;
+                self.scene_dirty = true;
+            }
         }
     }
 }
 
 impl Runtime {
-    fn handle_pointer(&mut self, x: f32, y: f32) {
-        match self.scene.hit_test(x, y) {
-            Some(UiAction::CloseOverview) if self.role == ShellRole::Overview => {
-                self.exit = true;
-            }
-            Some(UiAction::FocusWorkspace(workspace)) => {
+    fn dispatch_ui_action(&mut self, action: UiAction) {
+        match action {
+            UiAction::CloseOverview => self.exit = true,
+            UiAction::FocusWorkspace(workspace) => {
                 self.action_worker
                     .dispatch(DesktopCommand::FocusWorkspace { workspace });
                 if self.role == ShellRole::Overview {
                     self.exit = true;
                 }
             }
-            Some(UiAction::FocusWindow(window)) => {
+            UiAction::FocusWindow(window) => {
                 self.action_worker
                     .dispatch(DesktopCommand::FocusWindow { window });
                 if self.role == ShellRole::Overview {
                     self.exit = true;
                 }
             }
-            Some(UiAction::RestoreWindow(window)) => {
+            UiAction::RestoreWindow(window) => {
                 self.action_worker
                     .dispatch(DesktopCommand::RestoreWindow { window });
                 if self.role == ShellRole::Overview {
                     self.exit = true;
                 }
             }
-            Some(UiAction::CloseOverview) | None => {}
         }
     }
-}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OverviewAction {
-    Close,
-    FocusWorkspace(WorkspaceId),
-}
-
-fn overview_action(role: ShellRole, raw_keysym: u32) -> Option<OverviewAction> {
-    if role != ShellRole::Overview {
-        return None;
-    }
-    match raw_keysym {
-        0xff1b => Some(OverviewAction::Close),
-        0x31..=0x39 => Some(OverviewAction::FocusWorkspace(WorkspaceId(
-            raw_keysym - 0x30,
-        ))),
-        0x30 => Some(OverviewAction::FocusWorkspace(WorkspaceId(10))),
-        _ => None,
+    fn handle_pointer(&mut self, x: f32, y: f32) {
+        if let Some(action) = self.scene.hit_test(x, y) {
+            self.dispatch_ui_action(action);
+        }
     }
 }
 
@@ -853,19 +898,5 @@ mod tests {
         assert_eq!(ShellRole::Overview.exclusive_zone(), -1);
         assert_eq!(ShellRole::parse("bar"), Some(ShellRole::Bar));
         assert_eq!(ShellRole::parse("unknown"), None);
-    }
-
-    #[test]
-    fn overview_keyboard_actions_are_role_scoped_and_bounded() {
-        assert_eq!(
-            overview_action(ShellRole::Overview, 0x31),
-            Some(OverviewAction::FocusWorkspace(WorkspaceId(1)))
-        );
-        assert_eq!(
-            overview_action(ShellRole::Overview, 0xff1b),
-            Some(OverviewAction::Close)
-        );
-        assert_eq!(overview_action(ShellRole::Bar, 0x31), None);
-        assert_eq!(overview_action(ShellRole::Overview, 0x61), None);
     }
 }

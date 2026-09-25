@@ -81,9 +81,12 @@ pub struct UiScene {
     revision: u64,
     nodes: Vec<UiNode>,
     targets: Vec<HitTarget>,
+    search_actions: Vec<UiAction>,
 }
 
 const MAX_OVERVIEW_WINDOWS: usize = 32;
+const MAX_SEARCH_RESULTS: usize = 12;
+pub const MAX_SEARCH_QUERY: usize = 64;
 const OVERVIEW_COLUMNS: usize = 4;
 
 fn window_label(window: &WindowSummary) -> String {
@@ -92,7 +95,79 @@ fn window_label(window: &WindowSummary) -> String {
     } else {
         window.title.as_str()
     };
-    label.chars().take(48).collect()
+    bounded_text(label, 48)
+}
+
+fn bounded_text(value: &str, max: usize) -> String {
+    value.chars().take(max).collect()
+}
+
+#[derive(Clone, Debug)]
+struct SearchResult {
+    title: String,
+    detail: String,
+    action: UiAction,
+}
+
+fn search_results(snapshot: &DesktopSnapshot, query: &str) -> Vec<SearchResult> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::with_capacity(MAX_SEARCH_RESULTS);
+    for window in &snapshot.windows {
+        let title = window_label(window);
+        let app_id = if window.app_id.is_empty() {
+            "Application".to_owned()
+        } else {
+            bounded_text(&window.app_id, 32)
+        };
+        let haystack =
+            format!("{} {} workspace {}", title, app_id, window.workspace.0).to_lowercase();
+        if haystack.contains(&needle) {
+            let detail = if window.minimized {
+                format!("{} · Restore minimized window", app_id)
+            } else {
+                format!("{} · Workspace {}", app_id, window.workspace.0)
+            };
+            results.push(SearchResult {
+                title,
+                detail: bounded_text(&detail, 64),
+                action: if window.minimized {
+                    UiAction::RestoreWindow(window.id)
+                } else {
+                    UiAction::FocusWindow(window.id)
+                },
+            });
+            if results.len() == MAX_SEARCH_RESULTS {
+                return results;
+            }
+        }
+    }
+
+    for workspace in &snapshot.workspaces {
+        let title = format!("Workspace {}", workspace.workspace.0);
+        if title.to_lowercase().contains(&needle) {
+            results.push(SearchResult {
+                title,
+                detail: "Switch workspace".into(),
+                action: UiAction::FocusWorkspace(workspace.workspace),
+            });
+            if results.len() == MAX_SEARCH_RESULTS {
+                return results;
+            }
+        }
+    }
+
+    if "close overview".contains(&needle) || "escape".contains(&needle) {
+        results.push(SearchResult {
+            title: "Close overview".into(),
+            detail: "Return to the desktop".into(),
+            action: UiAction::CloseOverview,
+        });
+    }
+    results
 }
 
 impl UiScene {
@@ -101,6 +176,7 @@ impl UiScene {
             revision,
             nodes: Vec::new(),
             targets: Vec::new(),
+            search_actions: Vec::new(),
         }
     }
 
@@ -129,9 +205,81 @@ impl UiScene {
             .map(|target| target.action)
     }
 
+    pub fn search_action(&self, index: usize) -> Option<UiAction> {
+        self.search_actions.get(index).copied()
+    }
+
+    pub fn search_result_count(&self) -> usize {
+        self.search_actions.len()
+    }
+
     fn target(&mut self, bounds: Rect, action: UiAction) {
         self.targets.push(HitTarget { bounds, action });
     }
+    fn add_search_results(
+        &mut self,
+        snapshot: &DesktopSnapshot,
+        query: &str,
+        selected: usize,
+        width: f32,
+    ) {
+        let results = search_results(snapshot, query);
+        let panel_width = width.clamp(1.0, 690.0);
+        let panel_x = ((width - panel_width) / 2.0).max(0.0);
+        let row_height = 44.0;
+        let panel_height = ((results.len().max(1) as f32) * row_height + 16.0).min(360.0);
+        let panel = Rect::new(panel_x, 112.0, panel_width, panel_height);
+        self.push(UiNode::Panel {
+            id: NodeId(3_000),
+            bounds: panel,
+            color: Color::rgba(26, 36, 48, 245),
+        });
+
+        if results.is_empty() {
+            let bounds = Rect::new(panel.x + 16.0, panel.y + 8.0, panel.width - 32.0, 28.0);
+            self.push(UiNode::Label {
+                id: NodeId(3_001),
+                bounds,
+                color: Color::TEXT,
+                text: "No matching windows, workspaces, or actions".into(),
+            });
+            return;
+        }
+
+        let selected = selected.min(results.len() - 1);
+        for (index, result) in results.into_iter().enumerate() {
+            let bounds = Rect::new(
+                panel.x + 8.0,
+                panel.y + 8.0 + index as f32 * row_height,
+                (panel.width - 16.0).max(1.0),
+                40.0,
+            );
+            self.push(UiNode::Panel {
+                id: NodeId(3_100 + index as u64),
+                bounds,
+                color: if index == selected {
+                    Color::rgba(61, 90, 117, 255)
+                } else {
+                    Color::rgba(26, 36, 48, 0)
+                },
+            });
+            let text = bounded_text(&format!("{} · {}", result.title, result.detail), 96);
+            self.push(UiNode::Label {
+                id: NodeId(3_200 + index as u64),
+                bounds: Rect::new(
+                    bounds.x + 10.0,
+                    bounds.y + 4.0,
+                    (bounds.width - 20.0).max(1.0),
+                    32.0,
+                ),
+                color: Color::TEXT,
+                text,
+            });
+            self.search_actions.push(result.action);
+            self.target(bounds, result.action);
+        }
+    }
+
     pub fn bar(revision: u64, width: f32, height: f32) -> Self {
         let mut scene = Self::new(revision);
         scene.push(UiNode::Panel {
@@ -203,6 +351,17 @@ impl UiScene {
         height: f32,
         snapshot: Option<&DesktopSnapshot>,
     ) -> Self {
+        Self::overview_with_snapshot_and_search(revision, width, height, snapshot, "", 0)
+    }
+
+    pub fn overview_with_snapshot_and_search(
+        revision: u64,
+        width: f32,
+        height: f32,
+        snapshot: Option<&DesktopSnapshot>,
+        query: &str,
+        selected: usize,
+    ) -> Self {
         let mut scene = Self::overview(revision, width, height);
         if let Some(snapshot) = snapshot
             && let Some(workspace) = snapshot
@@ -214,10 +373,14 @@ impl UiScene {
                 id: NodeId(100),
                 bounds: Rect::new(32.0, 64.0, width - 64.0, height - 96.0),
                 color: Color::TEXT,
-                text: format!(
-                    "Workspace {} · {} windows",
-                    workspace.workspace.0, workspace.window_count
-                ),
+                text: if query.is_empty() {
+                    format!(
+                        "Workspace {} · {} windows",
+                        workspace.workspace.0, workspace.window_count
+                    )
+                } else {
+                    format!("Search: {}", bounded_text(query, MAX_SEARCH_QUERY))
+                },
             });
             for (index, workspace) in snapshot.workspaces.iter().enumerate() {
                 let bounds = Rect::new(32.0 + index as f32 * 76.0, 20.0, 68.0, 30.0);
@@ -282,6 +445,9 @@ impl UiScene {
                         UiAction::FocusWindow(window.id)
                     },
                 );
+            }
+            if !query.is_empty() {
+                scene.add_search_results(snapshot, query, selected, width);
             }
         }
         scene
@@ -364,6 +530,46 @@ mod tests {
         assert_eq!(
             overview.hit_test(1000.0, 700.0),
             Some(UiAction::CloseOverview)
+        );
+    }
+
+    #[test]
+    fn search_results_provide_bounded_actions() {
+        let snapshot = DesktopSnapshot {
+            generation: 1,
+            workspaces: vec![knave_desktop_api::WorkspaceSummary {
+                workspace: WorkspaceId(1),
+                active: true,
+                window_count: 1,
+                visible_window_count: 1,
+            }],
+            windows: vec![WindowSummary {
+                id: WindowId(9),
+                title: "Editor".into(),
+                app_id: "code".into(),
+                workspace: WorkspaceId(1),
+                focused: false,
+                minimized: true,
+                floating: false,
+                fullscreen: false,
+            }],
+        };
+        let scene = UiScene::overview_with_snapshot_and_search(
+            1,
+            1920.0,
+            1080.0,
+            Some(&snapshot),
+            "editor",
+            0,
+        );
+        assert_eq!(scene.search_result_count(), 1);
+        assert_eq!(
+            scene.search_action(0),
+            Some(UiAction::RestoreWindow(WindowId(9)))
+        );
+        assert_eq!(
+            scene.hit_test(960.0, 130.0),
+            Some(UiAction::RestoreWindow(WindowId(9)))
         );
     }
 }
