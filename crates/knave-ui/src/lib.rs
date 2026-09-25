@@ -1,6 +1,7 @@
 //! Renderer-independent primitives for the Knave shell UI.
 
-use knave_desktop_api::DesktopSnapshot;
+use knave_desktop_api::{DesktopSnapshot, WorkspaceId};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Color {
     pub red: u8,
@@ -46,6 +47,18 @@ impl Rect {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NodeId(pub u64);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiAction {
+    CloseOverview,
+    FocusWorkspace(WorkspaceId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HitTarget {
+    bounds: Rect,
+    action: UiAction,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiNode {
     Panel {
@@ -65,6 +78,7 @@ pub enum UiNode {
 pub struct UiScene {
     revision: u64,
     nodes: Vec<UiNode>,
+    targets: Vec<HitTarget>,
 }
 
 impl UiScene {
@@ -72,6 +86,7 @@ impl UiScene {
         Self {
             revision,
             nodes: Vec::new(),
+            targets: Vec::new(),
         }
     }
 
@@ -87,6 +102,22 @@ impl UiScene {
         self.nodes.push(node);
     }
 
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<UiAction> {
+        self.targets
+            .iter()
+            .rev()
+            .find(|target| {
+                x >= target.bounds.x
+                    && x < target.bounds.x + target.bounds.width
+                    && y >= target.bounds.y
+                    && y < target.bounds.y + target.bounds.height
+            })
+            .map(|target| target.action)
+    }
+
+    fn target(&mut self, bounds: Rect, action: UiAction) {
+        self.targets.push(HitTarget { bounds, action });
+    }
     pub fn bar(revision: u64, width: f32, height: f32) -> Self {
         let mut scene = Self::new(revision);
         scene.push(UiNode::Panel {
@@ -123,6 +154,22 @@ impl UiScene {
                     |workspace| format!("Workspace {}", workspace.workspace.0),
                 );
         }
+        if let Some(snapshot) = snapshot {
+            for (index, workspace) in snapshot.workspaces.iter().enumerate() {
+                let bounds = Rect::new(150.0 + index as f32 * 38.0, 5.0, 32.0, height - 10.0);
+                scene.push(UiNode::Label {
+                    id: NodeId(10 + index as u64),
+                    bounds,
+                    color: if workspace.active {
+                        Color::ACCENT
+                    } else {
+                        Color::TEXT
+                    },
+                    text: workspace.workspace.0.to_string(),
+                });
+                scene.target(bounds, UiAction::FocusWorkspace(workspace.workspace));
+            }
+        }
         scene
     }
 
@@ -133,6 +180,7 @@ impl UiScene {
             bounds: Rect::new(0.0, 0.0, width, height),
             color: Color::BACKGROUND,
         });
+        scene.target(Rect::new(0.0, 0.0, width, height), UiAction::CloseOverview);
         scene
     }
     pub fn overview_with_snapshot(
@@ -150,13 +198,27 @@ impl UiScene {
         {
             scene.push(UiNode::Label {
                 id: NodeId(100),
-                bounds: Rect::new(32.0, 32.0, width - 64.0, height - 64.0),
+                bounds: Rect::new(32.0, 64.0, width - 64.0, height - 96.0),
                 color: Color::TEXT,
                 text: format!(
                     "Workspace {} · {} windows",
                     workspace.workspace.0, workspace.window_count
                 ),
             });
+            for (index, workspace) in snapshot.workspaces.iter().enumerate() {
+                let bounds = Rect::new(32.0 + index as f32 * 76.0, 20.0, 68.0, 30.0);
+                scene.push(UiNode::Label {
+                    id: NodeId(110 + index as u64),
+                    bounds,
+                    color: if workspace.active {
+                        Color::ACCENT
+                    } else {
+                        Color::TEXT
+                    },
+                    text: workspace.workspace.0.to_string(),
+                });
+                scene.target(bounds, UiAction::FocusWorkspace(workspace.workspace));
+            }
         }
         scene
     }
@@ -201,6 +263,14 @@ mod tests {
         let bar = UiScene::bar_with_snapshot(4, 1920.0, 36.0, Some(&snapshot));
         assert!(matches!(&bar.nodes()[1], UiNode::Label { text, .. } if text == "Workspace 2"));
         let overview = UiScene::overview_with_snapshot(4, 1920.0, 1080.0, Some(&snapshot));
-        assert_eq!(overview.nodes().len(), 2);
+        assert_eq!(overview.nodes().len(), 3);
+        assert_eq!(
+            overview.hit_test(40.0, 25.0),
+            Some(UiAction::FocusWorkspace(WorkspaceId(2)))
+        );
+        assert_eq!(
+            overview.hit_test(1000.0, 700.0),
+            Some(UiAction::CloseOverview)
+        );
     }
 }

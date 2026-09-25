@@ -13,7 +13,7 @@ use knave_desktop_api::{
     WorkspaceId,
 };
 use knave_renderer::{RenderCommand, WgpuPainter, WgpuRenderer};
-use knave_ui::{Color, UiScene};
+use knave_ui::{Color, UiAction, UiScene};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
@@ -23,6 +23,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Modifiers, RawModifiers},
+        pointer::{BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::{
         WaylandSurface,
@@ -35,7 +36,7 @@ use smithay_client_toolkit::{
 use wayland_client::{
     Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_seat, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
 };
 use wgpu::rwh::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
 
@@ -357,6 +358,7 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
         output_state: OutputState::new(&globals, &queue_handle),
         seat_state: SeatState::new(&globals, &queue_handle),
         keyboard: None,
+        pointer: None,
         role,
         layer,
         renderer,
@@ -389,6 +391,7 @@ struct Runtime {
     output_state: OutputState,
     seat_state: SeatState,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    pointer: Option<wl_pointer::WlPointer>,
     role: ShellRole,
     layer: LayerSurface,
     renderer: WgpuRenderer,
@@ -515,6 +518,30 @@ impl Runtime {
     }
 }
 
+impl Runtime {
+    fn handle_pointer(&mut self, x: f32, y: f32) {
+        let scene = self.role.scene(
+            self.revision,
+            self.width as f32,
+            self.height as f32,
+            self.snapshot.as_ref(),
+        );
+        match scene.hit_test(x, y) {
+            Some(UiAction::CloseOverview) if self.role == ShellRole::Overview => {
+                self.exit = true;
+            }
+            Some(UiAction::FocusWorkspace(workspace)) => {
+                self.action_worker
+                    .dispatch(DesktopCommand::FocusWorkspace { workspace });
+                if self.role == ShellRole::Overview {
+                    self.exit = true;
+                }
+            }
+            Some(UiAction::CloseOverview) | None => {}
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OverviewAction {
     Close,
@@ -555,6 +582,12 @@ impl SeatHandler for Runtime {
                 Err(error) => eprintln!("knave-shell: could not acquire shell keyboard: {error}"),
             }
         }
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            match self.seat_state.get_pointer(qh, &seat) {
+                Ok(pointer) => self.pointer = Some(pointer),
+                Err(error) => eprintln!("knave-shell: could not acquire shell pointer: {error}"),
+            }
+        }
     }
 
     fn remove_capability(
@@ -568,6 +601,11 @@ impl SeatHandler for Runtime {
             && let Some(keyboard) = self.keyboard.take()
         {
             keyboard.release();
+        }
+        if capability == Capability::Pointer
+            && let Some(pointer) = self.pointer.take()
+        {
+            pointer.release();
         }
     }
 
@@ -639,6 +677,28 @@ impl KeyboardHandler for Runtime {
         _raw_modifiers: RawModifiers,
         _layout: u32,
     ) {
+    }
+}
+
+impl PointerHandler for Runtime {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        let surface = self.layer.wl_surface().clone();
+        for event in events {
+            if event.surface != surface {
+                continue;
+            }
+            if let PointerEventKind::Press { button, .. } = &event.kind
+                && *button == BTN_LEFT
+            {
+                self.handle_pointer(event.position.0 as f32, event.position.1 as f32);
+            }
+        }
     }
 }
 

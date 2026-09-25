@@ -13,7 +13,9 @@ backend. The direct Wayland layer-shell path is the runtime target.
 
 The bar is a top layer with a 36-pixel exclusive zone. The overview is an
 on-demand exclusive overlay; Escape closes it and number keys 1-9/0 focus the
-corresponding workspace before closing it. Both consume Knave's versioned
+corresponding workspace before closing it. The bar exposes workspace hit targets for
+pointer activation; the overview also closes when its background is clicked. Both
+consume Knave's versioned
 desktop snapshot contract and keep IPC off the Wayland frame thread.
 
 ## Build
@@ -56,7 +58,8 @@ packaging. The installer also writes the README below the selected prefix.
 
 The Rust/wgpu workspace is the sole shell implementation. It draws bounded
 rectangle and bitmap-text commands through the direct Wayland layer-shell
-runtime. Remaining product work is interaction breadth, richer text and image
+runtime. Pointer activation is limited to workspace targets and overview
+dismissal. Remaining product work is interaction breadth, richer text and image
 primitives, packaging integration, and live direct-TTY/GPU coverage; none of
 these depend on restoring the removed Qt/CMake path.
 
