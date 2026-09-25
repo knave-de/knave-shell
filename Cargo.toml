@@ -18,7 +18,7 @@ knave-renderer = { path = "crates/knave-renderer" }
 knave-wayland = { path = "crates/knave-wayland" }
 knave-ui = { path = "crates/knave-ui" }
 wgpu = "30.0.1"
-knave-desktop-api = { git = "ssh://git@github.com/knave-de/knave.git", rev = "1eb63fe" }
+knave-desktop-api = { git = "ssh://git@github.com/knave-de/knave.git", rev = "a2cb08f" }
 pollster = "1.0.1"
 thiserror = "2.0.21"
 smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["xkbcommon"] }
