@@ -11,4 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 knave-renderer.workspace = true
+knave-wayland.workspace = true
 knave-ui.workspace = true

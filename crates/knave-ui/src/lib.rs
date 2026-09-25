@@ -1,5 +1,6 @@
 //! Renderer-independent primitives for the Knave shell UI.
 
+use knave_desktop_api::DesktopSnapshot;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Color {
     pub red: u8,
@@ -102,6 +103,29 @@ impl UiScene {
         scene
     }
 
+    pub fn bar_with_snapshot(
+        revision: u64,
+        width: f32,
+        height: f32,
+        snapshot: Option<&DesktopSnapshot>,
+    ) -> Self {
+        let mut scene = Self::bar(revision, width, height);
+        if let Some(UiNode::Label { text, .. }) = scene.nodes.get_mut(1) {
+            *text = snapshot
+                .and_then(|snapshot| {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.active)
+                })
+                .map_or_else(
+                    || "Knave".into(),
+                    |workspace| format!("Workspace {}", workspace.workspace.0),
+                );
+        }
+        scene
+    }
+
     pub fn overview(revision: u64, width: f32, height: f32) -> Self {
         let mut scene = Self::new(revision);
         scene.push(UiNode::Panel {
@@ -109,6 +133,31 @@ impl UiScene {
             bounds: Rect::new(0.0, 0.0, width, height),
             color: Color::BACKGROUND,
         });
+        scene
+    }
+    pub fn overview_with_snapshot(
+        revision: u64,
+        width: f32,
+        height: f32,
+        snapshot: Option<&DesktopSnapshot>,
+    ) -> Self {
+        let mut scene = Self::overview(revision, width, height);
+        if let Some(snapshot) = snapshot
+            && let Some(workspace) = snapshot
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.active)
+        {
+            scene.push(UiNode::Label {
+                id: NodeId(100),
+                bounds: Rect::new(32.0, 32.0, width - 64.0, height - 64.0),
+                color: Color::TEXT,
+                text: format!(
+                    "Workspace {} · {} windows",
+                    workspace.workspace.0, workspace.window_count
+                ),
+            });
+        }
         scene
     }
 }
@@ -136,5 +185,22 @@ mod tests {
                 color: Color::BACKGROUND,
             }
         );
+    }
+    #[test]
+    fn snapshot_scene_reflects_active_workspace() {
+        let snapshot = DesktopSnapshot {
+            generation: 4,
+            workspaces: vec![knave_desktop_api::WorkspaceSummary {
+                workspace: knave_desktop_api::WorkspaceId(2),
+                active: true,
+                window_count: 3,
+                visible_window_count: 2,
+            }],
+            windows: Vec::new(),
+        };
+        let bar = UiScene::bar_with_snapshot(4, 1920.0, 36.0, Some(&snapshot));
+        assert!(matches!(&bar.nodes()[1], UiNode::Label { text, .. } if text == "Workspace 2"));
+        let overview = UiScene::overview_with_snapshot(4, 1920.0, 1080.0, Some(&snapshot));
+        assert_eq!(overview.nodes().len(), 2);
     }
 }

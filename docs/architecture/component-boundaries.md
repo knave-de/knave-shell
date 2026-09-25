@@ -8,7 +8,7 @@ The shell:
 
 - consumes typed settings projections and versioned desktop contracts from
   Knave;
-- uses explicit adapters for Wayland and compositor integration;
+- uses an explicit Wayland client and the versioned Knave desktop API;
 - owns presentation and interaction state; and
 - reports lifecycle failures to the session owner.
 

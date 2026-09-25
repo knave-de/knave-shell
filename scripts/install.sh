@@ -5,9 +5,9 @@ usage() {
     cat <<'EOF'
 Usage: scripts/install.sh [--user|--system|--prefix PATH]
 
-Installs the Rust/wgpu Knave Shell bootstrap binary and README.
-The Wayland runtime is still under rewrite and is not replaced by this
-bootstrap installer until the compositor-facing surface is complete.
+Builds and installs the Rust/wgpu Knave Shell binary and README.
+Use --user for ~/.local, --system for /usr/local, or --prefix for an
+explicit staging or packaging prefix.
 EOF
 }
 
@@ -52,3 +52,5 @@ fi
 "${install_cmd[@]}" -Dm755 "${repo_root}/target/release/knave-shell" \
     "${prefix}/bin/knave-shell"
 "${install_cmd[@]}" -Dm644 "${repo_root}/README.md" \
+    "${prefix}/share/doc/knave-shell/README.md"
+echo "installed knave-shell into ${prefix}/bin"

@@ -25,8 +25,8 @@ been checked.
 ## Ownership and contracts
 
 Knave owns the user-facing configuration and settings model. This repository
-may retain legacy Villain configuration compatibility during migration, but it
-must not introduce another competing user configuration source.
+consumes Knave-owned settings only through typed APIs and public desktop
+contracts. It must not introduce another user configuration source.
 
 Villain remains the source of truth for workspace, window, focus, and preview
 state. The shell consumes typed desktop contracts and must not duplicate
