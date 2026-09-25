@@ -12,7 +12,7 @@ use knave_desktop_api::{
     DesktopClient, DesktopCommand, DesktopQuery, DesktopRequest, DesktopResponse, DesktopSnapshot,
     WorkspaceId,
 };
-use knave_renderer::{RenderCommand, WgpuPainter, WgpuRenderer};
+use knave_renderer::{RenderCommand, RenderList, WgpuPainter, WgpuRenderer};
 use knave_ui::{Color, UiAction, UiScene};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -372,6 +372,9 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
         snapshot_worker: SnapshotWorker::start(),
         action_worker: ActionWorker::start(),
         snapshot: None,
+        scene: UiScene::new(0),
+        render_list: RenderList::default(),
+        scene_dirty: true,
         painter: None,
         configured: false,
         exit: false,
@@ -403,6 +406,9 @@ struct Runtime {
     snapshot_worker: SnapshotWorker,
     action_worker: ActionWorker,
     snapshot: Option<DesktopSnapshot>,
+    scene: UiScene,
+    render_list: RenderList,
+    scene_dirty: bool,
     width: u32,
     height: u32,
     revision: u64,
@@ -422,15 +428,19 @@ impl Runtime {
         }
         if let Some(snapshot) = self.snapshot_worker.latest() {
             self.snapshot = Some(snapshot);
+            self.scene_dirty = true;
         }
-
-        let scene = self.role.scene(
-            self.revision,
-            self.width as f32,
-            self.height as f32,
-            self.snapshot.as_ref(),
-        );
-        let render_list = self.renderer.prepare(&scene);
+        if self.scene_dirty {
+            self.scene = self.role.scene(
+                self.revision,
+                self.width as f32,
+                self.height as f32,
+                self.snapshot.as_ref(),
+            );
+            self.render_list = self.renderer.prepare(&self.scene);
+            self.scene_dirty = false;
+        }
+        let render_list = &self.render_list;
         let clear_color = render_list
             .commands
             .iter()
@@ -492,7 +502,7 @@ impl Runtime {
                 &mut encoder,
                 &view,
                 (self.width, self.height),
-                &render_list,
+                render_list,
             );
         }
         self.layer
@@ -520,13 +530,7 @@ impl Runtime {
 
 impl Runtime {
     fn handle_pointer(&mut self, x: f32, y: f32) {
-        let scene = self.role.scene(
-            self.revision,
-            self.width as f32,
-            self.height as f32,
-            self.snapshot.as_ref(),
-        );
-        match scene.hit_test(x, y) {
+        match self.scene.hit_test(x, y) {
             Some(UiAction::CloseOverview) if self.role == ShellRole::Overview => {
                 self.exit = true;
             }
@@ -819,6 +823,7 @@ impl LayerShellHandler for Runtime {
         };
         self.surface.configure(&self.device, &config);
         self.painter = Some(WgpuPainter::new(&self.device, config.format));
+        self.scene_dirty = true;
         self.configured = true;
         self.snapshot_worker.request_refresh();
         self.draw(qh);

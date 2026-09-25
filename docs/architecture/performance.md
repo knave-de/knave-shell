@@ -31,7 +31,9 @@ The current Rust/wgpu shell keeps the interactive overview bounded:
 - the overview uses a fixed four-column card layout and caps each window label at
   48 Unicode scalar values; and
 - pointer and keyboard actions share one worker with a one-entry queue, so input
-  bursts are dropped with a diagnostic instead of creating parallel work.
+  bursts are dropped with a diagnostic instead of creating parallel work; and
+- the renderer caches the scene and render list, rebuilding them only after a
+  snapshot or surface-size change rather than on every frame callback.
 
 Window image previews and search are not fetched or rendered by this slice. Their
 future implementation must define explicit decode, cache, refresh, and memory
