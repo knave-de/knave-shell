@@ -1,4 +1,17 @@
 [workspace]
-members = ["core"]
+members = [
+    "crates/knave-renderer",
+    "crates/knave-shell",
+    "crates/knave-ui",
+]
 resolver = "3"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+knave-renderer = { path = "crates/knave-renderer" }
+knave-ui = { path = "crates/knave-ui" }
+wgpu = "30.0.1"

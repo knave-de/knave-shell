@@ -1,0 +1,10 @@
+[package]
+name = "knave-renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wgpu renderer boundary for the Knave shell"
+
+[dependencies]
+knave-ui.workspace = true
+wgpu.workspace = true

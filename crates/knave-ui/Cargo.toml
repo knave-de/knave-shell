@@ -1,0 +1,6 @@
+[package]
+name = "knave-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Renderer-independent UI scene and interaction primitives for Knave"
