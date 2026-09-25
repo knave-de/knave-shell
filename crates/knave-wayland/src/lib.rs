@@ -19,6 +19,10 @@ use knave_desktop_api::{
 };
 use knave_renderer::{RenderCommand, RenderList, WgpuPainter, WgpuRenderer};
 use knave_ui::{Color, MAX_SEARCH_QUERY, UiAction, UiImage, UiScene, WorkspacePreviewImage};
+use smithay_client_toolkit::reexports::{
+    calloop::{EventLoop, channel},
+    calloop_wayland_source::WaylandSource,
+};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
@@ -167,6 +171,12 @@ const PREVIEW_HEIGHT: u32 = 180;
 const MAX_PREVIEW_PIXELS: u64 = (PREVIEW_WIDTH as u64) * (PREVIEW_HEIGHT as u64);
 const MAX_PREVIEW_BASE64_LENGTH: usize = 512 * 1024;
 
+enum RuntimeWake {
+    Redraw,
+}
+
+type WakeSender = channel::SyncSender<RuntimeWake>;
+
 enum SnapshotCommand {
     Refresh,
     Stop,
@@ -179,17 +189,22 @@ struct SnapshotWorker {
 }
 
 impl SnapshotWorker {
-    fn start() -> Self {
+    fn start(wake: WakeSender) -> Self {
         let (commands, command_rx) = mpsc::sync_channel(1);
         let (updates, update_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
             let mut client = None;
             let mut backoff = SNAPSHOT_REFRESH;
+            let mut last_generation = None;
             loop {
                 match query_snapshot(&mut client) {
                     Ok(snapshot) => {
                         backoff = SNAPSHOT_REFRESH;
-                        let _ = updates.try_send(snapshot);
+                        if last_generation != Some(snapshot.generation) {
+                            last_generation = Some(snapshot.generation);
+                            let _ = updates.try_send(snapshot);
+                            let _ = wake.try_send(RuntimeWake::Redraw);
+                        }
                     }
                     Err(()) => {
                         client = None;
@@ -248,7 +263,7 @@ struct PreviewWorker {
 }
 
 impl PreviewWorker {
-    fn start() -> Self {
+    fn start(wake: WakeSender) -> Self {
         let (commands, command_rx) = mpsc::sync_channel(1);
         let updates = Arc::new(Mutex::new(None));
         let update_slot = Arc::clone(&updates);
@@ -268,6 +283,7 @@ impl PreviewWorker {
                                 generation,
                                 previews,
                             });
+                            let _ = wake.try_send(RuntimeWake::Redraw);
                         }
                     }
                 }
@@ -491,7 +507,7 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
             "{error}; start the Knave compositor and use its WAYLAND_DISPLAY"
         ))
     })?;
-    let (globals, mut event_queue) = registry_queue_init(&connection)
+    let (globals, event_queue) = registry_queue_init(&connection)
         .map_err(|error| WaylandError::Globals(error.to_string()))?;
     let queue_handle = event_queue.handle();
 
@@ -544,6 +560,21 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default()))
         .map_err(|error| WaylandError::Device(error.to_string()))?;
 
+    let mut event_loop: EventLoop<Runtime> =
+        EventLoop::try_new().map_err(|error| WaylandError::Dispatch(error.to_string()))?;
+    WaylandSource::new(connection.clone(), event_queue)
+        .insert(event_loop.handle())
+        .map_err(|error| WaylandError::Dispatch(error.to_string()))?;
+    let (wake_sender, wake_channel) = channel::sync_channel(1);
+    let wake_queue_handle = queue_handle.clone();
+    event_loop
+        .handle()
+        .insert_source(wake_channel, move |event, _, state| match event {
+            channel::Event::Msg(RuntimeWake::Redraw) => state.request_draw(&wake_queue_handle),
+            channel::Event::Closed => state.exit = true,
+        })
+        .map_err(|error| WaylandError::Dispatch(error.to_string()))?;
+
     let mut state = Runtime {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &queue_handle),
@@ -560,9 +591,10 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
         width: 1,
         height: 1,
         revision: 0,
-        snapshot_worker: SnapshotWorker::start(),
+        frame_pending: false,
+        snapshot_worker: SnapshotWorker::start(wake_sender.clone()),
         action_worker: ActionWorker::start(),
-        preview_worker: (role == ShellRole::Overview).then(PreviewWorker::start),
+        preview_worker: (role == ShellRole::Overview).then(|| PreviewWorker::start(wake_sender)),
         snapshot: None,
         previews: Vec::new(),
         preview_generation: 0,
@@ -577,8 +609,8 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
     };
 
     while !state.exit {
-        event_queue
-            .blocking_dispatch(&mut state)
+        event_loop
+            .dispatch(None, &mut state)
             .map_err(|error| WaylandError::Dispatch(error.to_string()))?;
     }
 
@@ -613,6 +645,7 @@ struct Runtime {
     width: u32,
     height: u32,
     revision: u64,
+    frame_pending: bool,
     configured: bool,
     exit: bool,
 }
@@ -623,10 +656,17 @@ impl Runtime {
             .get_default_config(&self.adapter, width.max(1), height.max(1))
     }
 
+    fn request_draw(&mut self, qh: &QueueHandle<Self>) {
+        if self.configured && !self.frame_pending {
+            self.draw(qh);
+        }
+    }
+
     fn draw(&mut self, qh: &QueueHandle<Self>) {
         if !self.configured {
             return;
         }
+        let mut should_render = self.scene_dirty;
         if let Some(snapshot) = self.snapshot_worker.latest()
             && self.snapshot.as_ref() != Some(&snapshot)
         {
@@ -644,6 +684,7 @@ impl Runtime {
                 worker.request_refresh(generation, workspaces);
             }
             self.scene_dirty = true;
+            should_render = true;
         }
         if let Some(worker) = &self.preview_worker
             && let Some(update) = worker.latest()
@@ -651,6 +692,7 @@ impl Runtime {
         {
             self.previews = update.previews;
             self.scene_dirty = true;
+            should_render = true;
         }
         if self.scene_dirty {
             self.scene = self.role.scene(
@@ -666,6 +708,9 @@ impl Runtime {
             );
             self.render_list = self.renderer.prepare(&self.scene);
             self.scene_dirty = false;
+        }
+        if !should_render {
+            return;
         }
         let render_list = &self.render_list;
         let clear_color = render_list
@@ -732,6 +777,7 @@ impl Runtime {
                 render_list,
             );
         }
+        self.frame_pending = true;
         self.layer
             .wl_surface()
             .frame(qh, FrameCallbackData(self.layer.wl_surface().clone()));
@@ -742,7 +788,7 @@ impl Runtime {
 }
 
 impl Runtime {
-    fn handle_key(&mut self, event: KeyEvent) {
+    fn handle_key(&mut self, qh: &QueueHandle<Self>, event: KeyEvent) {
         if self.role != ShellRole::Overview {
             return;
         }
@@ -762,6 +808,7 @@ impl Runtime {
             0xff51 | 0xff52 => {
                 self.search_index = self.search_index.saturating_sub(1);
                 self.scene_dirty = true;
+                self.request_draw(qh);
                 return;
             }
             0xff53 | 0xff54 => {
@@ -770,12 +817,14 @@ impl Runtime {
                     self.search_index = (self.search_index + 1).min(result_count - 1);
                 }
                 self.scene_dirty = true;
+                self.request_draw(qh);
                 return;
             }
             0xff08 => {
                 if self.search_query.pop().is_some() {
                     self.search_index = 0;
                     self.scene_dirty = true;
+                    self.request_draw(qh);
                 }
                 return;
             }
@@ -802,6 +851,7 @@ impl Runtime {
             if changed {
                 self.search_index = 0;
                 self.scene_dirty = true;
+                self.request_draw(qh);
             }
         }
     }
@@ -919,12 +969,12 @@ impl KeyboardHandler for Runtime {
     fn press_key(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         _serial: u32,
         event: KeyEvent,
     ) {
-        self.handle_key(event);
+        self.handle_key(qh, event);
     }
 
     fn repeat_key(
@@ -1008,6 +1058,7 @@ impl CompositorHandler for Runtime {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        self.frame_pending = false;
         self.draw(qh);
     }
 

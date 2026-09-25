@@ -21,6 +21,16 @@ baseline exists, establish one before declaring the change complete. Report live
 Wayland, GPU, and installed-session measurements separately from build and unit
 test results.
 
+## Scheduling
+
+The runtime uses SCTK's calloop integration and an event-driven wake channel.
+The Wayland loop blocks when there is no compositor event or worker update.
+A snapshot worker polls the desktop contract at the existing 500ms interval but
+signals the UI only when the snapshot generation changes. Preview completion and
+input changes request one redraw; a frame callback is not rescheduled after an
+unchanged frame. The wake channel has one slot, and the runtime tracks one
+pending frame callback.
+
 ## Current shell bounds
 
 The current Rust/wgpu shell keeps the interactive overview bounded:
@@ -49,3 +59,15 @@ unavailable captures leave the workspace card's fallback panel in place; they do
 not block frame rendering. Ten current previews therefore have a bounded CPU
 pixel payload of about 2.2 MiB, while the 16-entry GPU cache is bounded at about
 3.7 MiB before driver overhead.
+
+## Nested baseline
+
+A release nested-session sample on 2026-09-26 used Winit, the bar role, no
+overview service, and six one-second process samples after two seconds of
+startup. The sampled process-lifetime CPU values settled from 2.4% to 0.8% for
+Villain and from 8.0% to 2.4% for Knave Shell; Knave stayed at 0.0%. RSS stayed
+around 121 MiB for Villain, 189 MiB for Knave Shell, and 3 MiB for Knave.
+The process counts were 9, 38, and 1 thread respectively. The run shut down
+without project child processes remaining. These are host-specific nested
+baselines, not acceptance thresholds; direct TTY/DRM/GPU behavior and visual
+latency remain unverified.

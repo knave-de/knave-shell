@@ -40,7 +40,9 @@ knave-desktop-api:
 KNAVE_SOCKET overrides the derived path for isolated tests. The client uses one
 bounded worker, a one-entry snapshot channel, a 500ms successful refresh
 interval, and exponential reconnect backoff capped at five seconds. It never
-blocks the Wayland frame callback on desktop IPC.
+blocks the Wayland frame callback on desktop IPC. The Wayland loop blocks when
+idle and redraws only for changed state, input, or preview completion; it does
+not submit an unchanged frame continuously.
 
 Input actions use a separate one-entry bounded queue and one worker. A full
 queue drops an action with an explicit diagnostic instead of creating threads.

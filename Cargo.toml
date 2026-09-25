@@ -23,5 +23,5 @@ wgpu = "30.0.1"
 knave-desktop-api = { git = "ssh://git@github.com/knave-de/knave.git", rev = "15c8ede" }
 pollster = "1.0.1"
 thiserror = "2.0.21"
-smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["xkbcommon"] }
+smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["calloop", "xkbcommon"] }
 wayland-client = { version = "0.31.15", features = ["system"] }
