@@ -3,7 +3,7 @@
 mod painter;
 pub use painter::WgpuPainter;
 
-use knave_ui::{Color, Rect, UiNode, UiScene};
+use knave_ui::{Color, Rect, UiImage, UiNode, UiScene};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderCommand {
@@ -15,6 +15,10 @@ pub enum RenderCommand {
         bounds: Rect,
         color: Color,
         text: String,
+    },
+    Image {
+        bounds: Rect,
+        image: UiImage,
     },
 }
 
@@ -43,6 +47,10 @@ impl RenderList {
                     bounds: *bounds,
                     color: *color,
                     text: text.clone(),
+                },
+                UiNode::Image { bounds, image, .. } => RenderCommand::Image {
+                    bounds: *bounds,
+                    image: image.clone(),
                 },
             })
             .collect();

@@ -1,19 +1,24 @@
 //! Knave-owned Wayland layer-shell and wgpu runtime.
 
 use std::{
+    io::Cursor,
     num::NonZeroU32,
     ptr::NonNull,
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, SyncSender},
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
 
+use base64::Engine;
 use knave_desktop_api::{
     DesktopClient, DesktopCommand, DesktopQuery, DesktopRequest, DesktopResponse, DesktopSnapshot,
-    WorkspaceId,
+    WorkspaceId, WorkspacePreview,
 };
 use knave_renderer::{RenderCommand, RenderList, WgpuPainter, WgpuRenderer};
-use knave_ui::{Color, MAX_SEARCH_QUERY, UiAction, UiScene};
+use knave_ui::{Color, MAX_SEARCH_QUERY, UiAction, UiImage, UiScene, WorkspacePreviewImage};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
@@ -97,19 +102,17 @@ impl ShellRole {
         }
     }
 
-    fn scene(
-        self,
-        revision: u64,
-        width: f32,
-        height: f32,
-        snapshot: Option<&DesktopSnapshot>,
-        query: &str,
-        selected: usize,
-    ) -> UiScene {
+    fn scene(self, revision: u64, width: f32, height: f32, input: SceneInput<'_>) -> UiScene {
         match self {
-            Self::Bar => UiScene::bar_with_snapshot(revision, width, height, snapshot),
+            Self::Bar => UiScene::bar_with_snapshot(revision, width, height, input.snapshot),
             Self::Overview => UiScene::overview_with_snapshot_and_search(
-                revision, width, height, snapshot, query, selected,
+                revision,
+                width,
+                height,
+                input.snapshot,
+                input.query,
+                input.selected,
+                input.previews,
             ),
         }
     }
@@ -126,6 +129,14 @@ impl ShellRole {
             a: f64::from(color.alpha) / 255.0,
         }
     }
+}
+
+#[derive(Debug)]
+struct SceneInput<'a> {
+    snapshot: Option<&'a DesktopSnapshot>,
+    query: &'a str,
+    selected: usize,
+    previews: &'a [WorkspacePreviewImage],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +161,11 @@ pub enum WaylandError {
 
 const SNAPSHOT_REFRESH: Duration = Duration::from_millis(500);
 const SNAPSHOT_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const MAX_PREVIEWS: usize = 10;
+const PREVIEW_WIDTH: u32 = 320;
+const PREVIEW_HEIGHT: u32 = 180;
+const MAX_PREVIEW_PIXELS: u64 = (PREVIEW_WIDTH as u64) * (PREVIEW_HEIGHT as u64);
+const MAX_PREVIEW_BASE64_LENGTH: usize = 512 * 1024;
 
 enum SnapshotCommand {
     Refresh,
@@ -209,6 +225,177 @@ impl Drop for SnapshotWorker {
             let _ = thread.join();
         }
     }
+}
+
+#[derive(Debug)]
+struct PreviewUpdate {
+    generation: u64,
+    previews: Vec<WorkspacePreviewImage>,
+}
+
+enum PreviewCommand {
+    Refresh {
+        generation: u64,
+        workspaces: Vec<WorkspaceId>,
+    },
+    Stop,
+}
+
+struct PreviewWorker {
+    commands: SyncSender<PreviewCommand>,
+    updates: Arc<Mutex<Option<PreviewUpdate>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl PreviewWorker {
+    fn start() -> Self {
+        let (commands, command_rx) = mpsc::sync_channel(1);
+        let updates = Arc::new(Mutex::new(None));
+        let update_slot = Arc::clone(&updates);
+        let thread = thread::spawn(move || {
+            let mut client = None;
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    PreviewCommand::Stop => break,
+                    PreviewCommand::Refresh {
+                        generation,
+                        mut workspaces,
+                    } => {
+                        workspaces.truncate(MAX_PREVIEWS);
+                        let previews = query_previews(&mut client, &workspaces);
+                        if let Ok(mut slot) = update_slot.lock() {
+                            *slot = Some(PreviewUpdate {
+                                generation,
+                                previews,
+                            });
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            commands,
+            updates,
+            thread: Some(thread),
+        }
+    }
+
+    fn request_refresh(&self, generation: u64, workspaces: Vec<WorkspaceId>) {
+        let _ = self.commands.try_send(PreviewCommand::Refresh {
+            generation,
+            workspaces,
+        });
+    }
+
+    fn latest(&self) -> Option<PreviewUpdate> {
+        self.updates.lock().ok()?.take()
+    }
+}
+
+impl Drop for PreviewWorker {
+    fn drop(&mut self) {
+        let _ = self.commands.try_send(PreviewCommand::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn query_previews(
+    client: &mut Option<DesktopClient>,
+    workspaces: &[WorkspaceId],
+) -> Vec<WorkspacePreviewImage> {
+    if workspaces.is_empty() {
+        return Vec::new();
+    }
+    if client.is_none() {
+        *client = DesktopClient::connect().ok();
+    }
+    let Some(_) = client.as_mut() else {
+        return Vec::new();
+    };
+
+    let mut previews = Vec::with_capacity(workspaces.len().min(MAX_PREVIEWS));
+    let mut failed = false;
+    for workspace in workspaces.iter().take(MAX_PREVIEWS).copied() {
+        let response = client
+            .as_mut()
+            .expect("preview client was initialized")
+            .request(&DesktopRequest::Query(DesktopQuery::WorkspacePreview {
+                workspace,
+                width: PREVIEW_WIDTH,
+                height: PREVIEW_HEIGHT,
+            }));
+        match response {
+            Ok(DesktopResponse::WorkspacePreview(preview)) => {
+                if let Some(preview) = decode_preview(preview) {
+                    previews.push(preview);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {
+                failed = true;
+                break;
+            }
+        }
+    }
+    if failed {
+        *client = None;
+    }
+    previews
+}
+
+fn decode_preview(preview: WorkspacePreview) -> Option<WorkspacePreviewImage> {
+    if preview.width != PREVIEW_WIDTH || preview.height != PREVIEW_HEIGHT {
+        return None;
+    }
+    if preview.png_base64.len() > MAX_PREVIEW_BASE64_LENGTH {
+        return None;
+    }
+    let encoded = base64::engine::general_purpose::STANDARD
+        .decode(preview.png_base64)
+        .ok()?;
+    let mut decoder = png::Decoder::new(Cursor::new(encoded));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().ok()?;
+    let pixel_count =
+        u64::from(reader.info().width).checked_mul(u64::from(reader.info().height))?;
+    if pixel_count == 0 || pixel_count > MAX_PREVIEW_PIXELS {
+        return None;
+    }
+    let max_bytes = usize::try_from(pixel_count.checked_mul(4)?).ok()?;
+    let output_size = reader.output_buffer_size()?;
+    if output_size > max_bytes {
+        return None;
+    }
+    let mut buffer = vec![0; output_size];
+    let info = reader.next_frame(&mut buffer).ok()?;
+    if info.width != preview.width || info.height != preview.height {
+        return None;
+    }
+    let data = &buffer[..info.buffer_size()];
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => data.to_vec(),
+        png::ColorType::Rgb => data
+            .chunks(3)
+            .filter(|pixel| pixel.len() == 3)
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+            .collect(),
+        png::ColorType::Grayscale => data
+            .iter()
+            .flat_map(|value| [*value, *value, *value, 255])
+            .collect(),
+        png::ColorType::GrayscaleAlpha => data
+            .chunks(2)
+            .filter(|pixel| pixel.len() == 2)
+            .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
+            .collect(),
+        png::ColorType::Indexed => return None,
+    };
+    Some(WorkspacePreviewImage {
+        workspace: preview.workspace,
+        image: UiImage::from_rgba(info.width, info.height, rgba)?,
+    })
 }
 
 enum ActionCommand {
@@ -375,7 +562,10 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
         revision: 0,
         snapshot_worker: SnapshotWorker::start(),
         action_worker: ActionWorker::start(),
+        preview_worker: (role == ShellRole::Overview).then(PreviewWorker::start),
         snapshot: None,
+        previews: Vec::new(),
+        preview_generation: 0,
         search_query: String::new(),
         search_index: 0,
         scene: UiScene::new(0),
@@ -411,7 +601,10 @@ struct Runtime {
     painter: Option<WgpuPainter>,
     snapshot_worker: SnapshotWorker,
     action_worker: ActionWorker,
+    preview_worker: Option<PreviewWorker>,
     snapshot: Option<DesktopSnapshot>,
+    previews: Vec<WorkspacePreviewImage>,
+    preview_generation: u64,
     search_query: String,
     search_index: usize,
     scene: UiScene,
@@ -434,8 +627,29 @@ impl Runtime {
         if !self.configured {
             return;
         }
-        if let Some(snapshot) = self.snapshot_worker.latest() {
+        if let Some(snapshot) = self.snapshot_worker.latest()
+            && self.snapshot.as_ref() != Some(&snapshot)
+        {
+            let generation = self.preview_generation.wrapping_add(1);
+            let workspaces = snapshot
+                .workspaces
+                .iter()
+                .take(MAX_PREVIEWS)
+                .map(|workspace| workspace.workspace)
+                .collect();
             self.snapshot = Some(snapshot);
+            self.previews.clear();
+            self.preview_generation = generation;
+            if let Some(worker) = &self.preview_worker {
+                worker.request_refresh(generation, workspaces);
+            }
+            self.scene_dirty = true;
+        }
+        if let Some(worker) = &self.preview_worker
+            && let Some(update) = worker.latest()
+            && self.preview_generation == update.generation
+        {
+            self.previews = update.previews;
             self.scene_dirty = true;
         }
         if self.scene_dirty {
@@ -443,9 +657,12 @@ impl Runtime {
                 self.revision,
                 self.width as f32,
                 self.height as f32,
-                self.snapshot.as_ref(),
-                &self.search_query,
-                self.search_index,
+                SceneInput {
+                    snapshot: self.snapshot.as_ref(),
+                    query: &self.search_query,
+                    selected: self.search_index,
+                    previews: &self.previews,
+                },
             );
             self.render_list = self.renderer.prepare(&self.scene);
             self.scene_dirty = false;
@@ -456,7 +673,7 @@ impl Runtime {
             .iter()
             .find_map(|command| match command {
                 RenderCommand::FillRect { color, .. } => Some(*color),
-                RenderCommand::Text { .. } => None,
+                RenderCommand::Text { .. } | RenderCommand::Image { .. } => None,
             })
             .map(|color| wgpu::Color {
                 r: f64::from(color.red) / 255.0,
@@ -898,5 +1115,47 @@ mod tests {
         assert_eq!(ShellRole::Overview.exclusive_zone(), -1);
         assert_eq!(ShellRole::parse("bar"), Some(ShellRole::Bar));
         assert_eq!(ShellRole::parse("unknown"), None);
+    }
+
+    #[test]
+    fn preview_decoder_accepts_bounded_rgba_png() {
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut encoded, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&vec![17; (PREVIEW_WIDTH * PREVIEW_HEIGHT * 4) as usize])
+                .unwrap();
+        }
+        let preview = decode_preview(WorkspacePreview {
+            workspace: WorkspaceId(1),
+            width: PREVIEW_WIDTH,
+            height: PREVIEW_HEIGHT,
+            png_base64: base64::engine::general_purpose::STANDARD.encode(encoded),
+        })
+        .unwrap();
+
+        assert_eq!(preview.workspace, WorkspaceId(1));
+        assert_eq!(preview.image.width(), PREVIEW_WIDTH);
+        assert_eq!(preview.image.height(), PREVIEW_HEIGHT);
+        assert_eq!(
+            preview.image.pixels().len(),
+            (PREVIEW_WIDTH * PREVIEW_HEIGHT * 4) as usize
+        );
+    }
+
+    #[test]
+    fn preview_decoder_rejects_unrequested_dimensions() {
+        assert!(
+            decode_preview(WorkspacePreview {
+                workspace: WorkspaceId(1),
+                width: 64,
+                height: 36,
+                png_base64: String::new(),
+            })
+            .is_none()
+        );
     }
 }

@@ -27,6 +27,10 @@ The current Rust/wgpu shell keeps the interactive overview bounded:
 
 - snapshot refreshes use one worker, one-entry command and update channels, a
   500ms successful interval, and reconnect backoff capped at five seconds;
+- overview preview capture uses one worker only while the overview is running,
+  one command slot, and one latest-value update slot;
+- preview capture considers at most 10 workspaces per changed snapshot and asks
+  Villain for exactly 320x180 images; it does not poll or decode per frame;
 - overview rendering considers at most 32 windows from the active workspace;
 - the overview uses a fixed four-column card layout and caps each window label at
   48 Unicode scalar values;
@@ -34,8 +38,14 @@ The current Rust/wgpu shell keeps the interactive overview bounded:
 - pointer and keyboard actions share one worker with a one-entry queue, so input
   bursts are dropped with a diagnostic instead of creating parallel work; and
 - the renderer caches the scene and render list, rebuilding them only after a
-  snapshot or surface-size change rather than on every frame callback.
+  snapshot or surface-size change rather than on every frame callback; and
+- the renderer keeps at most 16 decoded preview textures and reuses one image
+  vertex buffer, uploading a texture only when its immutable image source changes.
 
-Workspace image previews are not fetched or rendered by this slice. Their future
-implementation must define explicit decode, cache, refresh, and memory limits
-before being enabled.
+Preview decoding requires the requested dimensions, rejects malformed PNG data,
+rejects base64 payloads over 512 KiB, and caps decoded pixels at 320x180
+(230,400 RGBA bytes per image). Failed or
+unavailable captures leave the workspace card's fallback panel in place; they do
+not block frame rendering. Ten current previews therefore have a bounded CPU
+pixel payload of about 2.2 MiB, while the 16-entry GPU cache is bounded at about
+3.7 MiB before driver overhead.

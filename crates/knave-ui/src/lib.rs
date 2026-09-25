@@ -1,5 +1,7 @@
 //! Renderer-independent primitives for the Knave shell UI.
 
+use std::sync::Arc;
+
 use knave_desktop_api::{DesktopSnapshot, WindowId, WindowSummary, WorkspaceId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +46,51 @@ impl Rect {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiImage {
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+}
+
+impl UiImage {
+    pub fn from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
+        let expected = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        if pixels.len() != expected || width == 0 || height == 0 {
+            return None;
+        }
+        Some(Self {
+            width,
+            height,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    pub fn cache_key(&self) -> usize {
+        Arc::as_ptr(&self.pixels) as *const u8 as usize
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspacePreviewImage {
+    pub workspace: WorkspaceId,
+    pub image: UiImage,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NodeId(pub u64);
 
@@ -74,6 +121,11 @@ pub enum UiNode {
         color: Color,
         text: String,
     },
+    Image {
+        id: NodeId,
+        bounds: Rect,
+        image: UiImage,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -85,6 +137,7 @@ pub struct UiScene {
 }
 
 const MAX_OVERVIEW_WINDOWS: usize = 32;
+const MAX_OVERVIEW_WORKSPACES: usize = 10;
 const MAX_SEARCH_RESULTS: usize = 12;
 pub const MAX_SEARCH_QUERY: usize = 64;
 const OVERVIEW_COLUMNS: usize = 4;
@@ -351,7 +404,7 @@ impl UiScene {
         height: f32,
         snapshot: Option<&DesktopSnapshot>,
     ) -> Self {
-        Self::overview_with_snapshot_and_search(revision, width, height, snapshot, "", 0)
+        Self::overview_with_snapshot_and_search(revision, width, height, snapshot, "", 0, &[])
     }
 
     pub fn overview_with_snapshot_and_search(
@@ -361,6 +414,7 @@ impl UiScene {
         snapshot: Option<&DesktopSnapshot>,
         query: &str,
         selected: usize,
+        previews: &[WorkspacePreviewImage],
     ) -> Self {
         let mut scene = Self::overview(revision, width, height);
         if let Some(snapshot) = snapshot
@@ -398,6 +452,62 @@ impl UiScene {
             }
 
             let gap = 16.0;
+            let workspace_count = snapshot.workspaces.len().min(MAX_OVERVIEW_WORKSPACES);
+            let mut window_top = 112.0;
+            if workspace_count > 0 {
+                let preview_width = ((width - 64.0 - gap * (workspace_count as f32 - 1.0))
+                    / workspace_count as f32)
+                    .max(1.0);
+                let preview_height = (preview_width * 9.0 / 16.0).clamp(90.0, 260.0);
+                for (index, workspace) in
+                    snapshot.workspaces.iter().take(workspace_count).enumerate()
+                {
+                    let bounds = Rect::new(
+                        32.0 + index as f32 * (preview_width + gap),
+                        112.0,
+                        preview_width,
+                        preview_height,
+                    );
+                    scene.push(UiNode::Panel {
+                        id: NodeId(500 + index as u64),
+                        bounds,
+                        color: if workspace.active {
+                            Color::ACCENT
+                        } else {
+                            Color::rgba(35, 48, 64, 255)
+                        },
+                    });
+                    if let Some(preview) = previews
+                        .iter()
+                        .find(|preview| preview.workspace == workspace.workspace)
+                    {
+                        scene.push(UiNode::Image {
+                            id: NodeId(600 + index as u64),
+                            bounds: Rect::new(
+                                bounds.x + 2.0,
+                                bounds.y + 2.0,
+                                (bounds.width - 4.0).max(1.0),
+                                (bounds.height - 28.0).max(1.0),
+                            ),
+                            image: preview.image.clone(),
+                        });
+                    }
+                    scene.push(UiNode::Label {
+                        id: NodeId(700 + index as u64),
+                        bounds: Rect::new(
+                            bounds.x + 8.0,
+                            bounds.y + bounds.height - 24.0,
+                            (bounds.width - 16.0).max(1.0),
+                            20.0,
+                        ),
+                        color: Color::TEXT,
+                        text: format!("Workspace {}", workspace.workspace.0),
+                    });
+                    scene.target(bounds, UiAction::FocusWorkspace(workspace.workspace));
+                }
+                window_top = 112.0 + preview_height + 40.0;
+            }
+
             let card_width = ((width - 64.0 - gap * (OVERVIEW_COLUMNS as f32 - 1.0))
                 / OVERVIEW_COLUMNS as f32)
                 .max(1.0);
@@ -413,7 +523,7 @@ impl UiScene {
                 let row = index / OVERVIEW_COLUMNS;
                 let bounds = Rect::new(
                     32.0 + column as f32 * (card_width + gap),
-                    112.0 + row as f32 * (card_height + gap),
+                    window_top + row as f32 * (card_height + gap),
                     card_width,
                     card_height,
                 );
@@ -514,13 +624,13 @@ mod tests {
         let bar = UiScene::bar_with_snapshot(4, 1920.0, 36.0, Some(&snapshot));
         assert!(matches!(&bar.nodes()[1], UiNode::Label { text, .. } if text == "Workspace 2"));
         let overview = UiScene::overview_with_snapshot(4, 1920.0, 1080.0, Some(&snapshot));
-        assert_eq!(overview.nodes().len(), 7);
+        assert_eq!(overview.nodes().len(), 9);
         assert_eq!(
-            overview.hit_test(40.0, 120.0),
+            overview.hit_test(40.0, 420.0),
             Some(UiAction::FocusWindow(WindowId(41)))
         );
         assert_eq!(
-            overview.hit_test(500.0, 120.0),
+            overview.hit_test(500.0, 420.0),
             Some(UiAction::RestoreWindow(WindowId(42)))
         );
         assert_eq!(
@@ -530,6 +640,43 @@ mod tests {
         assert_eq!(
             overview.hit_test(1000.0, 700.0),
             Some(UiAction::CloseOverview)
+        );
+    }
+
+    #[test]
+    fn overview_scene_includes_bounded_workspace_preview() {
+        let snapshot = DesktopSnapshot {
+            generation: 1,
+            workspaces: vec![knave_desktop_api::WorkspaceSummary {
+                workspace: WorkspaceId(1),
+                active: true,
+                window_count: 0,
+                visible_window_count: 0,
+            }],
+            windows: Vec::new(),
+        };
+        let preview = WorkspacePreviewImage {
+            workspace: WorkspaceId(1),
+            image: UiImage::from_rgba(320, 180, vec![0; 320 * 180 * 4]).unwrap(),
+        };
+        let scene = UiScene::overview_with_snapshot_and_search(
+            1,
+            1920.0,
+            1080.0,
+            Some(&snapshot),
+            "",
+            0,
+            &[preview],
+        );
+
+        assert!(
+            scene
+                .nodes()
+                .iter()
+                .any(|node| matches!(node, UiNode::Image {
+            image,
+            ..
+        } if image.width() == 320 && image.height() == 180))
         );
     }
 
@@ -561,6 +708,7 @@ mod tests {
             Some(&snapshot),
             "editor",
             0,
+            &[],
         );
         assert_eq!(scene.search_result_count(), 1);
         assert_eq!(

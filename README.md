@@ -20,6 +20,8 @@ targets for pointer activation; overview cards focus normal windows or restore
 minimized ones, and clicking its background closes it. Both consume Knave's
 versioned
 desktop snapshot contract and keep IPC off the Wayland frame thread.
+Overview workspace cards request bounded 320x180 PNG previews asynchronously;
+the cards remain usable when a preview is unavailable.
 
 ## Build
 
@@ -43,6 +45,12 @@ blocks the Wayland frame callback on desktop IPC.
 Input actions use a separate one-entry bounded queue and one worker. A full
 queue drops an action with an explicit diagnostic instead of creating threads.
 
+Overview previews use one additional worker only for the overview role. It
+requests at most ten workspace captures per changed snapshot, keeps one latest
+update slot, rejects malformed or oversized PNGs, and uploads decoded images
+through the renderer's bounded texture cache. No preview request or decode runs
+on the Wayland frame callback.
+
 The shell does not own persistent settings. It receives the compositor's
 workspace/window state from Villain through Knave's public contract and sends
 user actions back through that same contract.
@@ -60,15 +68,15 @@ packaging. The installer also writes the README below the selected prefix.
 ## Migration status
 
 The Rust/wgpu workspace is the sole shell implementation. It draws bounded
-rectangle and bitmap-text commands through the direct Wayland layer-shell
-runtime. Pointer activation is limited to workspace targets and overview
-dismissal. Remaining product work is workspace image previews, richer text and image
-primitives, packaging integration, and live direct-TTY/GPU coverage; none of
-these depend on restoring the removed Qt/CMake path.
+rectangle, bitmap-text, and workspace-image commands through the direct Wayland
+layer-shell runtime. Pointer activation is limited to workspace targets and
+overview dismissal. Remaining product work is richer text primitives,
+packaging integration, and live direct-TTY/GPU coverage; none of these depend
+on restoring the removed Qt/CMake path.
 
 ## Workspace
 
 - knave-ui: renderer-independent scene and interaction primitives;
-- knave-renderer: render-list, bounded bitmap-text painter, and wgpu boundary;
+- knave-renderer: render-list, bounded bitmap-text/image painter, and wgpu boundary;
   and
 - knave-wayland: direct layer-shell client and bounded desktop-state bridge.
