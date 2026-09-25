@@ -6,5 +6,6 @@ license.workspace = true
 description = "wgpu renderer boundary for the Knave shell"
 
 [dependencies]
+bytemuck.workspace = true
 knave-ui.workspace = true
 wgpu.workspace = true

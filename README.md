@@ -50,13 +50,14 @@ packaging. The installer also writes the README below the selected prefix.
 
 ## Migration status
 
-The Rust/wgpu workspace is the target shell implementation. The old Qt/QML,
-C++ adapter, and CMake tree remains only as migration reference until the Rust
-runtime covers input, text rendering, interaction, installation, and live
-Wayland/GPU smoke behavior. It is not loaded by the Rust binaries.
+The Rust/wgpu workspace is the target shell implementation. The renderer now
+draws bounded rectangle and bitmap-text commands; the remaining migration work
+is interaction breadth, packaging, and live Wayland/GPU coverage. The old
+Qt/QML, C++ adapter, and CMake tree is not loaded by the Rust binaries.
 
 ## Workspace
 
 - knave-ui: renderer-independent scene and interaction primitives;
-- knave-renderer: render-list and wgpu boundary; and
+- knave-renderer: render-list, bounded bitmap-text painter, and wgpu boundary;
+  and
 - knave-wayland: direct layer-shell client and bounded desktop-state bridge.

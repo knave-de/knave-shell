@@ -389,6 +389,7 @@ dependencies = [
 name = "knave-renderer"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "knave-ui",
  "wgpu",
 ]

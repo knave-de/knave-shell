@@ -1,5 +1,8 @@
 //! wgpu-backed rendering boundary for Knave UI scenes.
 
+mod painter;
+pub use painter::WgpuPainter;
+
 use knave_ui::{Color, Rect, UiNode, UiScene};
 
 #[derive(Clone, Debug, PartialEq)]

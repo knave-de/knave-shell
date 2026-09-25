@@ -11,7 +11,7 @@ use std::{
 use knave_desktop_api::{
     DesktopClient, DesktopQuery, DesktopRequest, DesktopResponse, DesktopSnapshot,
 };
-use knave_renderer::{RenderCommand, WgpuRenderer};
+use knave_renderer::{RenderCommand, WgpuPainter, WgpuRenderer};
 use knave_ui::{Color, UiScene};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -297,6 +297,7 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
         revision: 0,
         snapshot_worker: SnapshotWorker::start(),
         snapshot: None,
+        painter: None,
         configured: false,
         exit: false,
     };
@@ -320,6 +321,7 @@ struct Runtime {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    painter: Option<WgpuPainter>,
     snapshot_worker: SnapshotWorker,
     snapshot: Option<DesktopSnapshot>,
     width: u32,
@@ -403,6 +405,16 @@ impl Runtime {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+        }
+        if let Some(painter) = &mut self.painter {
+            painter.encode(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &view,
+                (self.width, self.height),
+                &render_list,
+            );
         }
         self.layer
             .wl_surface()
@@ -515,6 +527,7 @@ impl LayerShellHandler for Runtime {
             return;
         };
         self.surface.configure(&self.device, &config);
+        self.painter = Some(WgpuPainter::new(&self.device, config.format));
         self.configured = true;
         self.snapshot_worker.request_refresh();
         self.draw(qh);
