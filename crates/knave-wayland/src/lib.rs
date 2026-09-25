@@ -537,6 +537,20 @@ impl Runtime {
                     self.exit = true;
                 }
             }
+            Some(UiAction::FocusWindow(window)) => {
+                self.action_worker
+                    .dispatch(DesktopCommand::FocusWindow { window });
+                if self.role == ShellRole::Overview {
+                    self.exit = true;
+                }
+            }
+            Some(UiAction::RestoreWindow(window)) => {
+                self.action_worker
+                    .dispatch(DesktopCommand::RestoreWindow { window });
+                if self.role == ShellRole::Overview {
+                    self.exit = true;
+                }
+            }
             Some(UiAction::CloseOverview) | None => {}
         }
     }

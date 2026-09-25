@@ -1,6 +1,6 @@
 //! Renderer-independent primitives for the Knave shell UI.
 
-use knave_desktop_api::{DesktopSnapshot, WorkspaceId};
+use knave_desktop_api::{DesktopSnapshot, WindowId, WindowSummary, WorkspaceId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Color {
@@ -51,6 +51,8 @@ pub struct NodeId(pub u64);
 pub enum UiAction {
     CloseOverview,
     FocusWorkspace(WorkspaceId),
+    FocusWindow(WindowId),
+    RestoreWindow(WindowId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,6 +81,18 @@ pub struct UiScene {
     revision: u64,
     nodes: Vec<UiNode>,
     targets: Vec<HitTarget>,
+}
+
+const MAX_OVERVIEW_WINDOWS: usize = 32;
+const OVERVIEW_COLUMNS: usize = 4;
+
+fn window_label(window: &WindowSummary) -> String {
+    let label = if window.title.is_empty() {
+        window.app_id.as_str()
+    } else {
+        window.title.as_str()
+    };
+    label.chars().take(48).collect()
 }
 
 impl UiScene {
@@ -219,6 +233,56 @@ impl UiScene {
                 });
                 scene.target(bounds, UiAction::FocusWorkspace(workspace.workspace));
             }
+
+            let gap = 16.0;
+            let card_width = ((width - 64.0 - gap * (OVERVIEW_COLUMNS as f32 - 1.0))
+                / OVERVIEW_COLUMNS as f32)
+                .max(1.0);
+            let card_height = 72.0;
+            for (index, window) in snapshot
+                .windows
+                .iter()
+                .filter(|window| window.workspace == workspace.workspace)
+                .take(MAX_OVERVIEW_WINDOWS)
+                .enumerate()
+            {
+                let column = index % OVERVIEW_COLUMNS;
+                let row = index / OVERVIEW_COLUMNS;
+                let bounds = Rect::new(
+                    32.0 + column as f32 * (card_width + gap),
+                    112.0 + row as f32 * (card_height + gap),
+                    card_width,
+                    card_height,
+                );
+                scene.push(UiNode::Panel {
+                    id: NodeId(1_000 + index as u64),
+                    bounds,
+                    color: if window.focused {
+                        Color::ACCENT
+                    } else {
+                        Color::rgba(35, 48, 64, 255)
+                    },
+                });
+                scene.push(UiNode::Label {
+                    id: NodeId(2_000 + index as u64),
+                    bounds: Rect::new(
+                        bounds.x + 12.0,
+                        bounds.y + 8.0,
+                        (bounds.width - 24.0).max(1.0),
+                        (bounds.height - 16.0).max(1.0),
+                    ),
+                    color: Color::TEXT,
+                    text: window_label(window),
+                });
+                scene.target(
+                    bounds,
+                    if window.minimized {
+                        UiAction::RestoreWindow(window.id)
+                    } else {
+                        UiAction::FocusWindow(window.id)
+                    },
+                );
+            }
         }
         scene
     }
@@ -258,12 +322,41 @@ mod tests {
                 window_count: 3,
                 visible_window_count: 2,
             }],
-            windows: Vec::new(),
+            windows: vec![
+                WindowSummary {
+                    id: WindowId(41),
+                    title: "Terminal".into(),
+                    app_id: "foot".into(),
+                    workspace: WorkspaceId(2),
+                    focused: true,
+                    minimized: false,
+                    floating: false,
+                    fullscreen: false,
+                },
+                WindowSummary {
+                    id: WindowId(42),
+                    title: "Editor".into(),
+                    app_id: "code".into(),
+                    workspace: WorkspaceId(2),
+                    focused: false,
+                    minimized: true,
+                    floating: false,
+                    fullscreen: false,
+                },
+            ],
         };
         let bar = UiScene::bar_with_snapshot(4, 1920.0, 36.0, Some(&snapshot));
         assert!(matches!(&bar.nodes()[1], UiNode::Label { text, .. } if text == "Workspace 2"));
         let overview = UiScene::overview_with_snapshot(4, 1920.0, 1080.0, Some(&snapshot));
-        assert_eq!(overview.nodes().len(), 3);
+        assert_eq!(overview.nodes().len(), 7);
+        assert_eq!(
+            overview.hit_test(40.0, 120.0),
+            Some(UiAction::FocusWindow(WindowId(41)))
+        );
+        assert_eq!(
+            overview.hit_test(500.0, 120.0),
+            Some(UiAction::RestoreWindow(WindowId(42)))
+        );
         assert_eq!(
             overview.hit_test(40.0, 25.0),
             Some(UiAction::FocusWorkspace(WorkspaceId(2)))
