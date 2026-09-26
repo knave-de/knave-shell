@@ -33,32 +33,39 @@ pending frame callback.
 
 ## Current shell bounds
 
-The current Rust/wgpu shell keeps the interactive overview bounded:
+The current Rust/wgpu shell keeps idle work, app discovery, and image memory
+bounded:
 
-- snapshot refreshes use one worker, one-entry command and update channels, a
-  500ms successful interval, and reconnect backoff capped at five seconds;
-- overview preview capture uses one worker only while the overview is running,
-  one command slot, and one latest-value update slot;
-- preview capture considers at most 10 workspaces per changed snapshot and asks
-  Villain for exactly 320x180 images; it does not poll or decode per frame;
-- overview rendering considers at most 32 windows from the active workspace;
-- the overview uses a fixed four-column card layout and caps each window label at
-  48 Unicode scalar values;
-- local search caps input at 64 Unicode scalar values and results at 12 entries; and
-- pointer and keyboard actions share one worker with a one-entry queue, so input
-  bursts are dropped with a diagnostic instead of creating parallel work; and
-- the renderer caches the scene and render list, rebuilding them only after a
-  snapshot or surface-size change rather than on every frame callback; and
-- the renderer keeps at most 16 decoded preview textures and reuses one image
-  vertex buffer, uploading a texture only when its immutable image source changes.
+- the snapshot worker uses one-entry command/update channels, a 500ms successful
+  interval, and reconnect backoff capped at five seconds;
+- preview capture uses one worker only while overview is running, requests at
+  most 10 workspace captures per changed snapshot, and decodes exact 320x180
+  images off the Wayland callback;
+- the app catalog uses one overview-lifetime worker, scans at most 8,192
+  directory entries, 2,048 desktop files, and 8 MiB of file data, and retains at
+  most 512 launchable entries; each source file is limited to 64 KiB;
+- icon requests are coalesced into one latest-value slot; at most 48 icons are
+  decoded/cached as 48x48 RGBA images, from source files no larger than 1 MiB;
+  PNG dimensions are capped at 512x512 and SVG output is rasterized directly to
+  48x48;
+- the overview shows at most 10 workspaces, 12 tiled windows, 24 minimized
+  windows, and 12 app-search results; search text is capped at 64 characters;
+- one event-loop timer refreshes the centered local date/time once per minute;
+  it creates no thread and no periodic redraw when the displayed minute has not
+  changed;
+- pointer and keyboard actions share one worker with a one-entry queue; a full
+  queue logs and drops the action rather than spawning parallel work;
+- the scene and render list rebuild only after a snapshot, input, clock, or
+  surface-size change; unchanged frames are not submitted continuously; and
+- the renderer reuses one image vertex buffer and bounds cached textures to 64
+  entries and 4 MiB of source pixels.
 
-Preview decoding requires the requested dimensions, rejects malformed PNG data,
-rejects base64 payloads over 512 KiB, and caps decoded pixels at 320x180
-(230,400 RGBA bytes per image). Failed or
-unavailable captures leave the workspace card's fallback panel in place; they do
-not block frame rendering. Ten current previews therefore have a bounded CPU
-pixel payload of about 2.2 MiB, while the 16-entry GPU cache is bounded at about
-3.7 MiB before driver overhead.
+Preview decoding rejects malformed PNG data, base64 payloads over 512 KiB, and
+decoded images larger than 320x180 (230,400 RGBA bytes per preview). Ten current
+previews therefore use about 2.2 MiB of CPU pixel data. At the same time, the
+48-icon CPU limit is about 0.42 MiB; the GPU cache can hold those icons plus the
+workspace previews and logo within its 4 MiB source-pixel cap. These figures
+exclude allocator and graphics-driver overhead.
 
 ## Nested baseline
 

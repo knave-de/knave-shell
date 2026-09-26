@@ -140,8 +140,12 @@ struct Viewport {
     size: [f32; 2],
 }
 
+const MAX_CACHED_IMAGES: usize = 64;
+const MAX_CACHED_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
 struct CachedImage {
     source: UiImage,
+    bytes: usize,
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
 }
@@ -158,6 +162,7 @@ pub struct WgpuPainter {
     image_vertices: Option<wgpu::Buffer>,
     image_vertex_capacity: usize,
     image_cache: Vec<CachedImage>,
+    image_cache_bytes: usize,
 }
 
 impl WgpuPainter {
@@ -308,6 +313,7 @@ impl WgpuPainter {
             image_vertices: None,
             image_vertex_capacity: 0,
             image_cache: Vec::new(),
+            image_cache_bytes: 0,
         }
     }
 
@@ -375,17 +381,25 @@ impl WgpuPainter {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         image: &UiImage,
-    ) -> usize {
+    ) -> Option<usize> {
+        let image_bytes = image.pixels().len();
+        if image_bytes > MAX_CACHED_IMAGE_BYTES {
+            return None;
+        }
         if let Some(index) = self.image_cache.iter().position(|cached| {
             cached.source.cache_key() == image.cache_key()
                 && cached.source.width() == image.width()
                 && cached.source.height() == image.height()
         }) {
-            return index;
+            return Some(index);
         }
 
-        if self.image_cache.len() >= 16 {
-            self.image_cache.remove(0);
+        while !self.image_cache.is_empty()
+            && (self.image_cache.len() >= MAX_CACHED_IMAGES
+                || self.image_cache_bytes + image_bytes > MAX_CACHED_IMAGE_BYTES)
+        {
+            let removed = self.image_cache.remove(0);
+            self.image_cache_bytes -= removed.bytes;
         }
         let size = wgpu::Extent3d {
             width: image.width(),
@@ -438,10 +452,12 @@ impl WgpuPainter {
         });
         self.image_cache.push(CachedImage {
             source: image.clone(),
+            bytes: image_bytes,
             _texture: texture,
             bind_group,
         });
-        self.image_cache.len() - 1
+        self.image_cache_bytes += image_bytes;
+        Some(self.image_cache.len() - 1)
     }
 
     fn encode_images(
@@ -455,12 +471,27 @@ impl WgpuPainter {
         if images.is_empty() {
             return;
         }
-        let cache_indices = images
+        let mut drawable_images = Vec::with_capacity(images.len());
+        for (bounds, image) in images {
+            if self.ensure_image(device, queue, image).is_some() {
+                drawable_images.push((*bounds, *image));
+            }
+        }
+        let cache_indices = drawable_images
             .iter()
-            .map(|(_, image)| self.ensure_image(device, queue, image))
+            .map(|(_, image)| {
+                self.image_cache
+                    .iter()
+                    .position(|cached| {
+                        cached.source.cache_key() == image.cache_key()
+                            && cached.source.width() == image.width()
+                            && cached.source.height() == image.height()
+                    })
+                    .expect("image was cached before drawing")
+            })
             .collect::<Vec<_>>();
-        let mut vertices = Vec::with_capacity(images.len() * 6);
-        for (bounds, _) in images {
+        let mut vertices = Vec::with_capacity(drawable_images.len() * 6);
+        for (bounds, _) in &drawable_images {
             push_image_quad(&mut vertices, bounds);
         }
         if vertices.is_empty() {

@@ -1,9 +1,12 @@
 //! Knave-owned Wayland layer-shell and wgpu runtime.
 
+mod app_catalog;
+
 use std::{
     io::Cursor,
+    mem::MaybeUninit,
     num::NonZeroU32,
-    ptr::NonNull,
+    ptr::{self, NonNull},
     sync::{
         Arc, Mutex,
         mpsc::{self, Receiver, SyncSender},
@@ -18,9 +21,15 @@ use knave_desktop_api::{
     WorkspaceId, WorkspacePreview,
 };
 use knave_renderer::{RenderCommand, RenderList, WgpuPainter, WgpuRenderer};
-use knave_ui::{Color, MAX_SEARCH_QUERY, UiAction, UiImage, UiScene, WorkspacePreviewImage};
+use knave_ui::{
+    ApplicationSummary, Color, MAX_SEARCH_QUERY, OverviewSceneInput, UiAction, UiImage, UiScene,
+    WorkspacePreviewImage,
+};
 use smithay_client_toolkit::reexports::{
-    calloop::{EventLoop, channel},
+    calloop::{
+        EventLoop, channel,
+        timer::{TimeoutAction, Timer},
+    },
     calloop_wayland_source::WaylandSource,
 };
 use smithay_client_toolkit::{
@@ -48,6 +57,36 @@ use wayland_client::{
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
 };
 use wgpu::rwh::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
+
+fn format_clock() -> String {
+    let now = unsafe { libc::time(ptr::null_mut()) };
+    let mut local = MaybeUninit::<libc::tm>::uninit();
+    // localtime_r writes the complete tm value when it returns a non-null pointer.
+    if unsafe { libc::localtime_r(&now, local.as_mut_ptr()) }.is_null() {
+        return String::new();
+    }
+    let local = unsafe { local.assume_init() };
+    let format = b"%a %b %d  %I:%M %p\0";
+    let mut buffer = [0 as libc::c_char; 64];
+    let length = unsafe {
+        libc::strftime(
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            format.as_ptr().cast(),
+            &local,
+        )
+    };
+    if length == 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(
+        &buffer[..length]
+            .iter()
+            .map(|character| *character as u8)
+            .collect::<Vec<_>>(),
+    )
+    .into_owned()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShellRole {
@@ -108,15 +147,27 @@ impl ShellRole {
 
     fn scene(self, revision: u64, width: f32, height: f32, input: SceneInput<'_>) -> UiScene {
         match self {
-            Self::Bar => UiScene::bar_with_snapshot(revision, width, height, input.snapshot),
-            Self::Overview => UiScene::overview_with_snapshot_and_search(
+            Self::Bar => UiScene::bar_with_status(
                 revision,
                 width,
                 height,
                 input.snapshot,
-                input.query,
-                input.selected,
-                input.previews,
+                input.clock,
+                input.logo,
+            ),
+            Self::Overview => UiScene::overview_with_data_and_search(
+                revision,
+                width,
+                height,
+                OverviewSceneInput {
+                    snapshot: input.snapshot,
+                    query: input.query,
+                    selected: input.selected,
+                    previews: input.previews,
+                    applications: input.applications,
+                    clock: input.clock,
+                    logo: input.logo,
+                },
             ),
         }
     }
@@ -141,6 +192,9 @@ struct SceneInput<'a> {
     query: &'a str,
     selected: usize,
     previews: &'a [WorkspacePreviewImage],
+    applications: Option<&'a [ApplicationSummary]>,
+    clock: &'a str,
+    logo: Option<&'a UiImage>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -170,12 +224,13 @@ const PREVIEW_WIDTH: u32 = 320;
 const PREVIEW_HEIGHT: u32 = 180;
 const MAX_PREVIEW_PIXELS: u64 = (PREVIEW_WIDTH as u64) * (PREVIEW_HEIGHT as u64);
 const MAX_PREVIEW_BASE64_LENGTH: usize = 512 * 1024;
+const CLOCK_REFRESH: Duration = Duration::from_secs(60);
 
-enum RuntimeWake {
+pub(crate) enum RuntimeWake {
     Redraw,
 }
 
-type WakeSender = channel::SyncSender<RuntimeWake>;
+pub(crate) type WakeSender = channel::SyncSender<RuntimeWake>;
 
 enum SnapshotCommand {
     Refresh,
@@ -575,6 +630,21 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
         })
         .map_err(|error| WaylandError::Dispatch(error.to_string()))?;
 
+    let clock_queue_handle = queue_handle.clone();
+    event_loop
+        .handle()
+        .insert_source(Timer::from_duration(CLOCK_REFRESH), move |_, _, state| {
+            let clock = format_clock();
+            if state.clock_text != clock {
+                state.clock_text = clock;
+                state.scene_dirty = true;
+                state.request_draw(&clock_queue_handle);
+            }
+            TimeoutAction::ToDuration(CLOCK_REFRESH)
+        })
+        .map_err(|error| WaylandError::Dispatch(error.to_string()))?;
+
+    let logo = app_catalog::load_brand_mark();
     let mut state = Runtime {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &queue_handle),
@@ -594,11 +664,18 @@ pub fn run(role: ShellRole) -> Result<(), WaylandError> {
         frame_pending: false,
         snapshot_worker: SnapshotWorker::start(wake_sender.clone()),
         action_worker: ActionWorker::start(),
-        preview_worker: (role == ShellRole::Overview).then(|| PreviewWorker::start(wake_sender)),
+        preview_worker: (role == ShellRole::Overview)
+            .then(|| PreviewWorker::start(wake_sender.clone())),
+        app_catalog_worker: (role == ShellRole::Overview)
+            .then(|| app_catalog::AppCatalogWorker::start(wake_sender)),
         snapshot: None,
         previews: Vec::new(),
+        applications: None,
+        requested_icon_ids: Vec::new(),
         preview_generation: 0,
         search_query: String::new(),
+        clock_text: format_clock(),
+        logo,
         search_index: 0,
         scene: UiScene::new(0),
         render_list: RenderList::default(),
@@ -634,11 +711,16 @@ struct Runtime {
     snapshot_worker: SnapshotWorker,
     action_worker: ActionWorker,
     preview_worker: Option<PreviewWorker>,
+    app_catalog_worker: Option<app_catalog::AppCatalogWorker>,
     snapshot: Option<DesktopSnapshot>,
     previews: Vec<WorkspacePreviewImage>,
+    applications: Option<Vec<ApplicationSummary>>,
+    requested_icon_ids: Vec<String>,
     preview_generation: u64,
     search_query: String,
     search_index: usize,
+    clock_text: String,
+    logo: Option<UiImage>,
     scene: UiScene,
     render_list: RenderList,
     scene_dirty: bool,
@@ -686,6 +768,28 @@ impl Runtime {
             self.scene_dirty = true;
             should_render = true;
         }
+        if let Some(update) = self
+            .app_catalog_worker
+            .as_ref()
+            .and_then(app_catalog::AppCatalogWorker::latest)
+        {
+            if let Some(applications) = update.applications {
+                self.applications = Some(applications);
+                self.requested_icon_ids.clear();
+            }
+            if let Some(applications) = self.applications.as_mut() {
+                for (id, icon) in update.icons {
+                    if let Some(application) = applications
+                        .iter_mut()
+                        .find(|application| application.id == id)
+                    {
+                        application.icon = Some(icon);
+                    }
+                }
+            }
+            self.scene_dirty = true;
+            should_render = true;
+        }
         if let Some(worker) = &self.preview_worker
             && let Some(update) = worker.latest()
             && self.preview_generation == update.generation
@@ -693,6 +797,22 @@ impl Runtime {
             self.previews = update.previews;
             self.scene_dirty = true;
             should_render = true;
+        }
+        if self.role == ShellRole::Overview {
+            let wanted_icons = self.desired_icon_ids();
+            if wanted_icons != self.requested_icon_ids {
+                if let Some(applications) = self.applications.as_mut() {
+                    for application in applications {
+                        application.icon = None;
+                    }
+                }
+                if let Some(worker) = &self.app_catalog_worker {
+                    worker.request_icons(wanted_icons.clone());
+                }
+                self.requested_icon_ids = wanted_icons;
+                self.scene_dirty = true;
+                should_render = true;
+            }
         }
         if self.scene_dirty {
             self.scene = self.role.scene(
@@ -704,6 +824,9 @@ impl Runtime {
                     query: &self.search_query,
                     selected: self.search_index,
                     previews: &self.previews,
+                    applications: self.applications.as_deref(),
+                    clock: &self.clock_text,
+                    logo: self.logo.as_ref(),
                 },
             );
             self.render_list = self.renderer.prepare(&self.scene);
@@ -788,6 +911,62 @@ impl Runtime {
 }
 
 impl Runtime {
+    fn desired_icon_ids(&self) -> Vec<String> {
+        const MAX_SEARCH_ICONS: usize = 12;
+        let mut ids = Vec::with_capacity(48);
+        if let Some(snapshot) = &self.snapshot
+            && let Some(active) = snapshot
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.active)
+        {
+            for window in snapshot
+                .windows
+                .iter()
+                .filter(|window| window.workspace == active.workspace && window.minimized)
+                .take(24)
+            {
+                if !window.app_id.is_empty() && !ids.contains(&window.app_id) {
+                    ids.push(window.app_id.clone());
+                }
+            }
+            for window in snapshot
+                .windows
+                .iter()
+                .filter(|window| {
+                    window.workspace == active.workspace && !window.minimized && !window.floating
+                })
+                .take(12)
+            {
+                if !window.app_id.is_empty() && !ids.contains(&window.app_id) {
+                    ids.push(window.app_id.clone());
+                }
+            }
+        }
+        if !self.search_query.is_empty()
+            && let Some(applications) = &self.applications
+        {
+            let query = self.search_query.to_lowercase();
+            for application in applications
+                .iter()
+                .filter(|application| {
+                    std::iter::once(application.id.as_str())
+                        .chain(std::iter::once(application.name.as_str()))
+                        .chain(std::iter::once(application.generic_name.as_str()))
+                        .chain(application.keywords.iter().map(String::as_str))
+                        .any(|value| value.to_lowercase().contains(&query))
+                })
+                .take(MAX_SEARCH_ICONS)
+            {
+                if !ids.contains(&application.id) {
+                    ids.push(application.id.clone());
+                }
+            }
+        }
+        ids.truncate(48);
+        ids
+    }
+
     fn handle_key(&mut self, qh: &QueueHandle<Self>, event: KeyEvent) {
         if self.role != ShellRole::Overview {
             return;
@@ -805,13 +984,13 @@ impl Runtime {
                 }
                 return;
             }
-            0xff51 | 0xff52 => {
+            0xff52 if !self.search_query.is_empty() => {
                 self.search_index = self.search_index.saturating_sub(1);
                 self.scene_dirty = true;
                 self.request_draw(qh);
                 return;
             }
-            0xff53 | 0xff54 => {
+            0xff54 if !self.search_query.is_empty() => {
                 let result_count = self.scene.search_result_count();
                 if result_count > 0 {
                     self.search_index = (self.search_index + 1).min(result_count - 1);
@@ -826,14 +1005,6 @@ impl Runtime {
                     self.scene_dirty = true;
                     self.request_draw(qh);
                 }
-                return;
-            }
-            0x31..=0x39 if self.search_query.is_empty() => {
-                self.dispatch_ui_action(UiAction::FocusWorkspace(WorkspaceId(raw_keysym - 0x30)));
-                return;
-            }
-            0x30 if self.search_query.is_empty() => {
-                self.dispatch_ui_action(UiAction::FocusWorkspace(WorkspaceId(10)));
                 return;
             }
             _ => {}
@@ -861,6 +1032,23 @@ impl Runtime {
     fn dispatch_ui_action(&mut self, action: UiAction) {
         match action {
             UiAction::CloseOverview => self.exit = true,
+            UiAction::OpenOverview => self.action_worker.dispatch(DesktopCommand::Spawn {
+                argv: vec!["knave-shell".into(), "overview".into()],
+            }),
+            UiAction::FocusSearch => {}
+            UiAction::LaunchApplication(index) => {
+                if let Some(application) = self
+                    .applications
+                    .as_ref()
+                    .and_then(|applications| applications.get(index))
+                    && !application.exec_argv.is_empty()
+                {
+                    self.action_worker.dispatch(DesktopCommand::Spawn {
+                        argv: application.exec_argv.clone(),
+                    });
+                    self.exit = true;
+                }
+            }
             UiAction::FocusWorkspace(workspace) => {
                 self.action_worker
                     .dispatch(DesktopCommand::FocusWorkspace { workspace });

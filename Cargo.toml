@@ -19,6 +19,10 @@ knave-wayland = { path = "crates/knave-wayland" }
 knave-ui = { path = "crates/knave-ui" }
 base64 = "0.22"
 png = "0.18"
+freedesktop-desktop-entry = "0.8.3"
+freedesktop-icons = "0.4.0"
+resvg = { version = "0.48.1", default-features = false }
+libc = "0.2"
 wgpu = "30.0.1"
 knave-desktop-api = { git = "https://github.com/knave-de/knave.git", rev = "15c8ede" }
 pollster = "1.0.1"

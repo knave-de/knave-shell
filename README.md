@@ -11,18 +11,13 @@ backend. The direct Wayland layer-shell path is the runtime target.
     knave-shell bar
     knave-shell overview
 
-The bar is a top layer with a 36-pixel exclusive zone. The overview is an
-on-demand exclusive overlay; Escape closes it and number keys 1-9/0 focus the
-corresponding workspace before closing it. Typing opens a bounded search over
-windows, workspaces, and close; Up/Down changes selection and Enter activates it.
-The overview uses the same 36-pixel status/workspace strip at its top edge,
-instead of drawing a second workspace selector. The bar exposes workspace hit
-targets for pointer activation; overview cards focus normal windows or restore
-minimized ones, and clicking its background closes it. Both consume Knave's
-versioned
-desktop snapshot contract and keep IPC off the Wayland frame thread.
-Overview workspace cards request bounded 320x180 PNG previews asynchronously;
-the cards remain usable when a preview is unavailable.
+The 36-pixel bar has the overview logo at the far left, workspace buttons
+beside it, and local date/time centered. Clicking the logo or pressing Super
+opens the exclusive overview; Escape closes it. In the overview, typing searches
+installed apps only. Up/Down selects a result and Enter launches it. With an
+empty query, the overview shows workspace previews, tiled windows, and a separate
+minimized-window section with app icons; selecting a workspace/window focuses it,
+and selecting a minimized window restores it.
 
 ## Build
 
@@ -49,10 +44,11 @@ Input actions use a separate one-entry bounded queue and one worker. A full
 queue drops an action with an explicit diagnostic instead of creating threads.
 
 Overview previews use one additional worker only for the overview role. It
-requests at most ten workspace captures per changed snapshot, keeps one latest
-update slot, rejects malformed or oversized PNGs, and uploads decoded images
-through the renderer's bounded texture cache. No preview request or decode runs
-on the Wayland frame callback.
+requests at most ten workspace captures per changed snapshot and rejects
+malformed or oversized PNGs. A second overview-only worker reads a bounded
+freedesktop application catalog and resolves icons on demand. File access, PNG
+decoding, and SVG rasterization happen off the Wayland frame callback. Both
+workers stop with the overview; neither installs a filesystem watcher.
 
 The shell does not own persistent settings. It receives the compositor's
 workspace/window state from Villain through Knave's public contract and sends
@@ -71,11 +67,10 @@ packaging. The installer also writes the README below the selected prefix.
 ## Migration status
 
 The Rust/wgpu workspace is the sole shell implementation. It draws bounded
-rectangle, bitmap-text, and workspace-image commands through the direct Wayland
-layer-shell runtime. Pointer activation is limited to workspace targets and
-overview dismissal. Remaining product work is richer text primitives,
-packaging integration, and live direct-TTY/GPU coverage; none of these depend
-on restoring the removed Qt/CMake path.
+rectangle, bitmap-text, and image commands through the direct Wayland layer-shell
+runtime. The current overview is intentionally limited to app search, workspaces,
+tiled windows, and minimized windows. Theme selection and additional menus are
+not part of this implementation.
 
 ## Workspace
 
