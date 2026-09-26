@@ -101,7 +101,11 @@ long documentation for routine refactors or repeat source code in prose.
 - Link dependent cross-repository pull requests.
 - Describe affected contracts, consumers, compatibility, verification,
   rollout, and rollback in cross-repository pull requests.
-- Always squash and merge.
+- Never merge, squash-merge, or otherwise integrate a branch or pull request
+  unless the user explicitly requests the merge. Creating or approving a pull
+  request, passing checks, or repository conventions do not authorize a merge.
+- When the user explicitly requests a merge, follow their specified method; if
+  they do not specify one, use squash merge.
 
 ## Verification
 
