@@ -15,7 +15,8 @@ The bar is a top layer with a 36-pixel exclusive zone. The overview is an
 on-demand exclusive overlay; Escape closes it and number keys 1-9/0 focus the
 corresponding workspace before closing it. Typing opens a bounded search over
 windows, workspaces, and close; Up/Down changes selection and Enter activates it.
-The bar exposes workspace hit
+The overview uses the same 36-pixel status/workspace strip at its top edge,
+instead of drawing a second workspace selector. The bar exposes workspace hit
 targets for pointer activation; overview cards focus normal windows or restore
 minimized ones, and clicking its background closes it. Both consume Knave's
 versioned
