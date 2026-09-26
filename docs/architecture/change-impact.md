@@ -16,4 +16,4 @@ cancellation and cleanup, and measured CPU, memory, thread, descriptor, and
 wakeup impact under representative workloads.
 
 Keep settings migration, session supervision, protocol changes, and
-legacy-tool removal in separate reviewable slices.
+old-tool removal in separate reviewable slices.
