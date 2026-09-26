@@ -141,6 +141,7 @@ const MAX_OVERVIEW_WORKSPACES: usize = 10;
 const MAX_SEARCH_RESULTS: usize = 12;
 pub const MAX_SEARCH_QUERY: usize = 64;
 const OVERVIEW_COLUMNS: usize = 4;
+const OVERVIEW_STATUS_NODE_ID_OFFSET: u64 = 10_000;
 
 fn window_label(window: &WindowSummary) -> String {
     let label = if window.title.is_empty() {
@@ -389,6 +390,12 @@ impl UiScene {
     }
 
     pub fn overview(revision: u64, width: f32, height: f32) -> Self {
+        let mut scene = Self::overview_background(revision, width, height);
+        scene.append_status_bar(width, None);
+        scene
+    }
+
+    fn overview_background(revision: u64, width: f32, height: f32) -> Self {
         let mut scene = Self::new(revision);
         scene.push(UiNode::Panel {
             id: NodeId(1),
@@ -397,6 +404,19 @@ impl UiScene {
         });
         scene.target(Rect::new(0.0, 0.0, width, height), UiAction::CloseOverview);
         scene
+    }
+
+    fn append_status_bar(&mut self, width: f32, snapshot: Option<&DesktopSnapshot>) {
+        let mut status_bar = Self::bar_with_snapshot(self.revision, width, 36.0, snapshot);
+        for node in &mut status_bar.nodes {
+            match node {
+                UiNode::Panel { id, .. } | UiNode::Label { id, .. } | UiNode::Image { id, .. } => {
+                    id.0 += OVERVIEW_STATUS_NODE_ID_OFFSET
+                }
+            }
+        }
+        self.nodes.append(&mut status_bar.nodes);
+        self.targets.append(&mut status_bar.targets);
     }
     pub fn overview_with_snapshot(
         revision: u64,
@@ -416,7 +436,8 @@ impl UiScene {
         selected: usize,
         previews: &[WorkspacePreviewImage],
     ) -> Self {
-        let mut scene = Self::overview(revision, width, height);
+        let mut scene = Self::overview_background(revision, width, height);
+        scene.append_status_bar(width, snapshot);
         if let Some(snapshot) = snapshot
             && let Some(workspace) = snapshot
                 .workspaces
@@ -428,28 +449,11 @@ impl UiScene {
                 bounds: Rect::new(32.0, 64.0, width - 64.0, height - 96.0),
                 color: Color::TEXT,
                 text: if query.is_empty() {
-                    format!(
-                        "Workspace {} · {} windows",
-                        workspace.workspace.0, workspace.window_count
-                    )
+                    format!("Overview · {} windows", workspace.window_count)
                 } else {
                     format!("Search: {}", bounded_text(query, MAX_SEARCH_QUERY))
                 },
             });
-            for (index, workspace) in snapshot.workspaces.iter().enumerate() {
-                let bounds = Rect::new(32.0 + index as f32 * 76.0, 20.0, 68.0, 30.0);
-                scene.push(UiNode::Label {
-                    id: NodeId(110 + index as u64),
-                    bounds,
-                    color: if workspace.active {
-                        Color::ACCENT
-                    } else {
-                        Color::TEXT
-                    },
-                    text: workspace.workspace.0.to_string(),
-                });
-                scene.target(bounds, UiAction::FocusWorkspace(workspace.workspace));
-            }
 
             let gap = 16.0;
             let workspace_count = snapshot.workspaces.len().min(MAX_OVERVIEW_WORKSPACES);
@@ -578,7 +582,7 @@ mod tests {
     #[test]
     fn overview_scene_does_not_require_a_gpu() {
         let scene = UiScene::overview(1, 1920.0, 1080.0);
-        assert_eq!(scene.nodes().len(), 1);
+        assert_eq!(scene.nodes().len(), 3);
         assert_eq!(
             scene.nodes()[0],
             UiNode::Panel {
@@ -587,6 +591,15 @@ mod tests {
                 color: Color::BACKGROUND,
             }
         );
+        assert!(matches!(
+            &scene.nodes()[1],
+            UiNode::Panel { bounds, .. }
+                if *bounds == Rect::new(0.0, 0.0, 1920.0, 36.0)
+        ));
+        assert!(matches!(
+            &scene.nodes()[2],
+            UiNode::Label { text, .. } if text == "Knave"
+        ));
     }
     #[test]
     fn snapshot_scene_reflects_active_workspace() {
@@ -624,7 +637,7 @@ mod tests {
         let bar = UiScene::bar_with_snapshot(4, 1920.0, 36.0, Some(&snapshot));
         assert!(matches!(&bar.nodes()[1], UiNode::Label { text, .. } if text == "Workspace 2"));
         let overview = UiScene::overview_with_snapshot(4, 1920.0, 1080.0, Some(&snapshot));
-        assert_eq!(overview.nodes().len(), 9);
+        assert!(overview.nodes().iter().any(|node| matches!(node, UiNode::Label { bounds, text, .. } if *bounds == Rect::new(16.0, 0.0, 1888.0, 36.0) && text == "Workspace 2")));
         assert_eq!(
             overview.hit_test(40.0, 420.0),
             Some(UiAction::FocusWindow(WindowId(41)))
@@ -634,9 +647,10 @@ mod tests {
             Some(UiAction::RestoreWindow(WindowId(42)))
         );
         assert_eq!(
-            overview.hit_test(40.0, 25.0),
+            overview.hit_test(160.0, 15.0),
             Some(UiAction::FocusWorkspace(WorkspaceId(2)))
         );
+        assert_eq!(overview.hit_test(40.0, 25.0), Some(UiAction::CloseOverview));
         assert_eq!(
             overview.hit_test(1000.0, 700.0),
             Some(UiAction::CloseOverview)
