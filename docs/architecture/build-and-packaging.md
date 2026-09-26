@@ -1,8 +1,8 @@
 # Shell build and packaging
 
-The target shell is Rust/Cargo-first: Cargo should build its libraries,
-binaries, tests, and workspace targets. The current Qt shell is transitional
-and may continue using CMake with Ninja in an isolated build directory.
+The shell is Rust/Cargo-only. Cargo builds its libraries, binary, tests, and
+workspace targets; no Qt, CMake, or generated native plugin is part of the
+supported build.
 
 Build changes must check debug and release artifact paths, generated files,
 dependency discovery, staged installation, and runtime lookup paths. Do not

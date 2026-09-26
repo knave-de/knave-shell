@@ -1,14 +1,14 @@
 # Shell component boundaries
 
 This repository owns the desktop-facing shell implementation and its UI
-composition. It may contain transitional Qt/QML/C++ code and the Rust shell,
-renderer, UI, and Wayland work needed to replace it.
+composition. The implementation is split into Rust crates for UI, rendering,
+Wayland, and the shell binary.
 
 The shell:
 
 - consumes typed settings projections and versioned desktop contracts from
   Knave;
-- uses explicit adapters for Wayland and compositor integration;
+- uses an explicit Wayland client and the versioned Knave desktop API;
 - owns presentation and interaction state; and
 - reports lifecycle failures to the session owner.
 

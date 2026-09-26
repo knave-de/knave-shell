@@ -1,4 +1,27 @@
 [workspace]
-members = ["core"]
+members = [
+    "crates/knave-renderer",
+    "crates/knave-shell",
+    "crates/knave-ui",
+    "crates/knave-wayland",
+]
 resolver = "3"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+knave-renderer = { path = "crates/knave-renderer" }
+knave-wayland = { path = "crates/knave-wayland" }
+knave-ui = { path = "crates/knave-ui" }
+base64 = "0.22"
+png = "0.18"
+wgpu = "30.0.1"
+knave-desktop-api = { git = "https://github.com/knave-de/knave.git", rev = "15c8ede" }
+pollster = "1.0.1"
+thiserror = "2.0.21"
+smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-client = { version = "0.31.15", features = ["system"] }

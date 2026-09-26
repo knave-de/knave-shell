@@ -12,5 +12,6 @@ migration where practical, and an explicit rollback path. Do not infer
 compatibility from a successful shell-only build.
 
 The supported shell/Villain/Knave combination belongs in the cross-repository
-release notes or compatibility matrix. Removing a legacy message, command, or
-binary is a later change after consumers have migrated.
+release notes or compatibility matrix. The removed Qt/C ABI implementation is
+not a supported compatibility target; runtime compatibility is defined by the
+Rust shell binary, the public desktop API, and the layer-shell contract.

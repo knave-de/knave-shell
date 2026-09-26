@@ -1,127 +1,84 @@
 # Knave Shell
 
-Knave Shell is the desktop-facing shell for the Knave Desktop Environment. The
-current implementation is a Qt Quick application with C++ adapters, a Rust
-core, and a private Qt Wayland layer-shell plugin. The Rust/wgpu shell is a
-future replacement, not the current build.
+Knave Shell is the Rust/wgpu user-facing shell for the independent Knave
+Desktop Environment. It owns presentation and interaction surfaces while
+Villain owns compositor policy, window state, focus, and input dispatch.
+Winit is not a host-desktop integration: it is only a nested development
+backend. The direct Wayland layer-shell path is the runtime target.
 
-## Responsibilities
+## Runtime
 
-Knave Shell owns presentation and interaction:
+    knave-shell bar
+    knave-shell overview
 
-- the top bar;
-- the workspace and window overview;
-- shell-side search and focus actions;
-- the Rust IPC client and decoded state model; and
-- layer-shell integration for shell surfaces.
-
-Villain remains the source of truth for windows, workspaces, focus, layout,
-input, and composition. The shell does not own compositor policy or a
-user-facing configuration file.
-
-    Qt Quick / QML
-          |
-          v
-    C++ ShellService
-          | typed C ABI
-          v
-    knave-shell-core (Rust)
-          | Villain IPC
-          v
-    Villain compositor
-
-The current shell uses Villain IPC protocol v2. The Rust core rejects an older
-protocol during connection setup.
-
-## Repository layout
-
-| Path | Purpose |
-| --- | --- |
-| app/ | Application entry point and QML service adapter |
-| core/ | Rust state, IPC client, previews, and stable C header |
-| layer-shell/ | Qt Wayland shell-integration plugin |
-| protocols/ | Wayland XML used for generated client code |
-| qml/ | Bar and overview views |
-
-## Requirements
-
-- Rust and Cargo;
-- CMake 3.24 or newer, Ninja, and a C++20 compiler;
-- Qt 6.6 or newer with Core, Gui, QML, Quick, Quick Controls 2,
-  Wayland Client, and Qt Wayland private development headers;
-- Wayland client development files, wayland-protocols, wayland-scanner, and
-  pkg-config; and
-- a running Villain compositor exposing IPC protocol v2.
-
-The layer-shell plugin uses Qt Wayland private API. Rebuild it after a Qt
-Wayland update; it is tied to the Qt build it was compiled against.
+The bar is a top layer with a 36-pixel exclusive zone. The overview is an
+on-demand exclusive overlay; Escape closes it and number keys 1-9/0 focus the
+corresponding workspace before closing it. Typing opens a bounded search over
+windows, workspaces, and close; Up/Down changes selection and Enter activates it.
+The bar exposes workspace hit
+targets for pointer activation; overview cards focus normal windows or restore
+minimized ones, and clicking its background closes it. Both consume Knave's
+versioned
+desktop snapshot contract and keep IPC off the Wayland frame thread.
+Overview workspace cards request bounded 320x180 PNG previews asynchronously;
+the cards remain usable when a preview is unavailable.
 
 ## Build
 
-Use an isolated Ninja build directory and an explicit staging prefix:
-
-    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-    cmake --build build
-    cmake --install build --prefix "$PWD/stage"
-
-CMake invokes Cargo with the locked workspace dependency set and links the
-debug Rust static library into the shell executable. The current CMake
-integration is transitional; it is not a Cargo-only shell build.
-
-Run the Rust checks separately:
-
     cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo build --workspace --release --locked
 
-## Run
+## Desktop contract
 
-Start Villain first, then run the shell inside the same Wayland session:
+The shell reads desktop state from Knave's JSON-lines API through
+knave-desktop-api:
 
-    build/bin/knave-shell bar
-    build/bin/knave-shell overview
+    $XDG_RUNTIME_DIR/knave/desktop-$WAYLAND_DISPLAY.sock
 
-The role defaults to bar. The overview uses a per-display local control socket
-so a second overview invocation toggles the existing instance. Set
-KNAVE_SHELL_DISABLE_SINGLE_INSTANCE=1 to disable that behavior during testing.
+KNAVE_SOCKET overrides the derived path for isolated tests. The client uses one
+bounded worker, a one-entry snapshot channel, a 500ms successful refresh
+interval, and exponential reconnect backoff capped at five seconds. It never
+blocks the Wayland frame callback on desktop IPC. The Wayland loop blocks when
+idle and redraws only for changed state, input, or preview completion; it does
+not submit an unchanged frame continuously.
 
-The Rust core discovers Villain at:
+Input actions use a separate one-entry bounded queue and one worker. A full
+queue drops an action with an explicit diagnostic instead of creating threads.
 
-    $XDG_RUNTIME_DIR/villain-$WAYLAND_DISPLAY.sock
+Overview previews use one additional worker only for the overview role. It
+requests at most ten workspace captures per changed snapshot, keeps one latest
+update slot, rejects malformed or oversized PNGs, and uploads decoded images
+through the renderer's bounded texture cache. No preview request or decode runs
+on the Wayland frame callback.
 
-Set VILLAIN_SOCKET to override the socket path. The shell configures its
-Wayland platform and layer-shell plugin path from the executable location;
-QT_PLUGIN_PATH may be supplied for an additional development path.
+The shell does not own persistent settings. It receives the compositor's
+workspace/window state from Villain through Knave's public contract and sends
+user actions back through that same contract.
 
-## Interaction
+## Install
 
-The bar's menu action starts the overview. Villain can also bind a standalone
-modifier release to:
+    scripts/install.sh --user
+    scripts/install.sh --system
+    scripts/install.sh --prefix "$PWD/stage"
 
-    [[bind]]
-    keys = "MOD"
-    dispatch = "exec"
-    args = ["knave-shell", "overview"]
+--user installs to ~/.local/bin and --system installs to /usr/local/bin,
+requesting sudo only for the target prefix. --prefix is explicit and useful for
+packaging. The installer also writes the README below the selected prefix.
 
-The overview can focus a workspace or window through Villain. Escape closes
-the overview without changing focus. Behavior that depends on focus, input,
-layer-shell, GPU presentation, or an installed prefix requires a live test;
-unit tests and compilation are not sufficient.
+## Migration status
 
-## Configuration and migration
+The Rust/wgpu workspace is the sole shell implementation. It draws bounded
+rectangle, bitmap-text, and workspace-image commands through the direct Wayland
+layer-shell runtime. Pointer activation is limited to workspace targets and
+overview dismissal. Remaining product work is richer text primitives,
+packaging integration, and live direct-TTY/GPU coverage; none of these depend
+on restoring the removed Qt/CMake path.
 
-Knave owns the target configuration at ~/.config/knave/config.toml. This
-repository must not introduce a competing shell configuration file. Current
-shell settings are supplied by runtime contracts and environment variables
-while the Knave settings API is being implemented.
+## Workspace
 
-## Documentation
-
-- [Architecture index](docs/architecture/README.md)
-- [Component boundaries](docs/architecture/component-boundaries.md)
-- [Performance policy](docs/architecture/performance.md)
-- [Change-impact checklist](docs/architecture/change-impact.md)
-- [Agent instructions](AGENTS.md)
-
-Use Conventional Commits and describe cross-repository contract, compatibility,
-verification, rollout, and rollback impact in pull requests.
+- knave-ui: renderer-independent scene and interaction primitives;
+- knave-renderer: render-list, bounded bitmap-text/image painter, and wgpu boundary;
+  and
+- knave-wayland: direct layer-shell client and bounded desktop-state bridge.
